@@ -1,6 +1,7 @@
 package io.github.limpdangler.vidsearch;
 
 import android.app.Activity;
+import android.app.PictureInPictureParams;
 import android.app.UiModeManager;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
@@ -9,8 +10,12 @@ import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
+import android.util.Rational;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -23,7 +28,6 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
-import android.widget.Toast;
 
 import java.io.ByteArrayInputStream;
 import java.util.Arrays;
@@ -82,6 +86,36 @@ public class MainActivity extends Activity {
     private WebChromeClient.CustomViewCallback fullCallback;
     private boolean isTv;
     private long lastToast;
+
+    // Picture-in-picture: shrink the video into a floating window when you press Home
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean playerOpen;        // is Vid Search's player showing? (checked every 2 s)
+    private boolean pipJustEnded;      // PiP window closed, or expanded back to full app?
+
+    // Shows only the player, filling the little window
+    private static final String PIP_ON_JS =
+        "(function(){var s=document.getElementById('vs-pip');if(!s){s=document.createElement('style');" +
+        "s.id='vs-pip';document.head.appendChild(s);}s.textContent=" +
+        "'body>*:not(#player){display:none!important}" +
+        "body{margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important}" +
+        "#player{position:fixed!important;inset:0!important;max-width:none!important;margin:0!important;z-index:2147483647}" +
+        "#player>*:not(.player-frame){display:none!important}" +
+        "#player .player-frame{width:100vw!important;height:100vh!important;aspect-ratio:auto!important;border:0!important;border-radius:0!important}" +
+        "#player .up-next,#player .skip-btn{display:none!important}';})()";
+    private static final String PIP_OFF_JS =
+        "(function(){var s=document.getElementById('vs-pip');if(s)s.remove();})()";
+
+    private final Runnable checkPlayer = new Runnable() {
+        @Override
+        public void run() {
+            if (web != null) {
+                web.evaluateJavascript(
+                    "(function(){try{return (typeof current!=='undefined'&&current)?'1':'0';}catch(e){return '0';}})()",
+                    r -> playerOpen = "\"1\"".equals(r));
+            }
+            handler.postDelayed(this, 2000);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedState) {
@@ -188,6 +222,35 @@ public class MainActivity extends Activity {
         if (savedState == null || web.restoreState(savedState) == null) {
             web.loadUrl(HOME);
         }
+        handler.postDelayed(checkPlayer, 2000);
+    }
+
+    // Pressing Home while a video is playing: shrink it into a floating window (phones only)
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        if (isTv || Build.VERSION.SDK_INT < 26) return;
+        if (!playerOpen && fullView == null) return;
+        try {
+            enterPictureInPictureMode(new PictureInPictureParams.Builder()
+                    .setAspectRatio(new Rational(16, 9))
+                    .build());
+        } catch (Exception ignored) {
+            // Picture-in-picture switched off for this app in Android settings
+        }
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean inPip, Configuration newConfig) {
+        super.onPictureInPictureModeChanged(inPip, newConfig);
+        if (web == null) return;
+        if (inPip) {
+            pipJustEnded = false;
+            if (fullView == null) web.evaluateJavascript(PIP_ON_JS, null);
+        } else {
+            pipJustEnded = true;
+            web.evaluateJavascript(PIP_OFF_JS, null);
+        }
     }
 
     // Is this address (or the site it belongs to) on the ad list?
@@ -207,7 +270,6 @@ public class MainActivity extends Activity {
         long now = System.currentTimeMillis();
         if (now - lastToast < 4000) return;
         lastToast = now;
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
     private void exitFullscreen() {
@@ -264,18 +326,38 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        web.onPause();
         CookieManager.getInstance().flush();
+        // Keep playing while in the floating window
+        if (Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode()) return;
+        web.onPause();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        pipJustEnded = false;
         web.onResume();
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        // The floating window was closed (swiped away / ✕): stop the video.
+        // Your spot is already saved, so it's in Continue watching.
+        boolean closedFromPip = pipJustEnded
+                || (Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode());
+        if (closedFromPip && web != null) {
+            pipJustEnded = false;
+            if (fullView != null) exitFullscreen();
+            web.evaluateJavascript(
+                "(function(){try{if(typeof current!=='undefined'&&current)closePlayer();}catch(e){}})()", null);
+            web.onPause();
+        }
+    }
+
+    @Override
     protected void onDestroy() {
+        handler.removeCallbacks(checkPlayer);
         if (web != null) {
             root.removeView(web);
             web.destroy();
