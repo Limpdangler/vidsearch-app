@@ -1,0 +1,53 @@
+// Vid Search Android app.
+// A small app that opens the Vid Search website in its own window and blocks
+// pop-ups, redirects and known ad networks. Built automatically by GitHub
+// (see .github/workflows/build.yml) — nothing to build by hand.
+
+plugins {
+    id 'com.android.application' version '8.5.2'
+}
+
+def runNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '1') as int
+
+android {
+    namespace 'io.github.limpdangler.vidsearch'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'io.github.limpdangler.vidsearch'
+        minSdk 24
+        targetSdk 34
+        versionCode runNumber          // goes up with every build, so updates install over the old app
+        versionName "1.0.${runNumber}"
+    }
+
+    // Simple folder layout: AndroidManifest.xml and java/ at the top level,
+    // res/ (icons, banner) is generated during the build.
+    sourceSets {
+        main {
+            manifest.srcFile 'AndroidManifest.xml'
+            java.srcDirs = ['java']
+            res.srcDirs = ['res']
+        }
+    }
+
+    // The signing key itself is kept secret in GitHub (KEYSTORE_B64) and unpacked during the build.
+    signingConfigs {
+        release {
+            storeFile file('release.jks')
+            storePassword 'vidsearch-app'
+            keyAlias 'vidsearch'
+            keyPassword 'vidsearch-app'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_
