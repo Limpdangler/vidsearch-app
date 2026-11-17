@@ -1,9 +1,15 @@
 package io.github.limpdangler.vidsearch;
 
 import android.app.Activity;
+import android.app.PendingIntent;
 import android.app.PictureInPictureParams;
+import android.app.RemoteAction;
 import android.app.UiModeManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.graphics.drawable.Icon;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -30,7 +36,9 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 
 import java.io.ByteArrayInputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
@@ -91,6 +99,25 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean playerOpen;        // is Vid Search's player showing? (checked every 2 s)
     private boolean pipJustEnded;      // PiP window closed, or expanded back to full app?
+    private boolean pipPlaying;        // is the video playing? (for the play/pause icon)
+    private boolean pipCanControl;     // can this source be paused? (VidNest / VidRift yes, vidsrc no)
+    private boolean receiverOn;
+    private static final String ACTION_TOGGLE = "io.github.limpdangler.vidsearch.PIP_TOGGLE";
+
+    // The floating window's play/pause button sends this; we pass it on to the website
+    private final BroadcastReceiver pipReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (web == null || !ACTION_TOGGLE.equals(intent.getAction())) return;
+            web.evaluateJavascript(
+                "(function(){try{return vsPipToggle();}catch(e){return 'none';}})()",
+                r -> {
+                    if ("\"playing\"".equals(r)) pipPlaying = true;
+                    else if ("\"paused\"".equals(r)) pipPlaying = false;
+                    updatePip();
+                });
+        }
+    };
 
     // Shows only the player, filling the little window
     private static final String PIP_ON_JS =
@@ -101,7 +128,9 @@ public class MainActivity extends Activity {
         "#player{position:fixed!important;inset:0!important;max-width:none!important;margin:0!important;z-index:2147483647}" +
         "#player>*:not(.player-frame){display:none!important}" +
         "#player .player-frame{width:100vw!important;height:100vh!important;aspect-ratio:auto!important;border:0!important;border-radius:0!important}" +
-        "#player .up-next,#player .skip-btn{display:none!important}';})()";
+        "#player .up-next,#player .skip-btn{display:none!important}" +
+        // invisible shield over the video, so taps on the floating window don't pop up the player's controls
+        "#player .player-frame::after{content:\"\";position:absolute;inset:0;z-index:9}';})()";
     private static final String PIP_OFF_JS =
         "(function(){var s=document.getElementById('vs-pip');if(s)s.remove();})()";
 
@@ -109,9 +138,21 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             if (web != null) {
+                // '0' = nothing playing; otherwise 3 digits: open, playing, can-control
                 web.evaluateJavascript(
-                    "(function(){try{return (typeof current!=='undefined'&&current)?'1':'0';}catch(e){return '0';}})()",
-                    r -> playerOpen = "\"1\"".equals(r));
+                    "(function(){try{if(typeof vsPipState==='function')return vsPipState();" +
+                    "return (typeof current!=='undefined'&&current)?'100':'0';}catch(e){return '0';}})()",
+                    r -> {
+                        String s = r == null ? "" : r.replace("\"", "");
+                        boolean open = s.startsWith("1");
+                        boolean playing = open && s.length() > 1 && s.charAt(1) == '1';
+                        boolean control = open && s.length() > 2 && s.charAt(2) == '1';
+                        boolean changed = playing != pipPlaying || control != pipCanControl;
+                        playerOpen = open;
+                        pipPlaying = playing;
+                        pipCanControl = control;
+                        if (changed) updatePip();
+                    });
             }
             handler.postDelayed(this, 2000);
         }
@@ -223,6 +264,14 @@ public class MainActivity extends Activity {
             web.loadUrl(HOME);
         }
         handler.postDelayed(checkPlayer, 2000);
+
+        // Listen for the floating window's play/pause button
+        if (Build.VERSION.SDK_INT >= 26) {
+            IntentFilter filter = new IntentFilter(ACTION_TOGGLE);
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(pipReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            else registerReceiver(pipReceiver, filter);
+            receiverOn = true;
+        }
     }
 
     // Pressing Home while a video is playing: shrink it into a floating window (phones only)
@@ -231,13 +280,38 @@ public class MainActivity extends Activity {
         super.onUserLeaveHint();
         if (isTv || Build.VERSION.SDK_INT < 26) return;
         if (!playerOpen && fullView == null) return;
+        // Switch to "video only" straight away, so the page doesn't flash while the window shrinks
+        if (fullView == null) web.evaluateJavascript(PIP_ON_JS, null);
         try {
-            enterPictureInPictureMode(new PictureInPictureParams.Builder()
-                    .setAspectRatio(new Rational(16, 9))
-                    .build());
+            enterPictureInPictureMode(pipParams());
         } catch (Exception ignored) {
             // Picture-in-picture switched off for this app in Android settings
         }
+    }
+
+    // The floating window's settings: 16:9, and a single play/pause button
+    // (only for sources that can be paused). No previous / next buttons.
+    private PictureInPictureParams pipParams() {
+        List<RemoteAction> actions = new ArrayList<>();
+        if (pipCanControl) {
+            Intent intent = new Intent(ACTION_TOGGLE).setPackage(getPackageName());
+            PendingIntent pi = PendingIntent.getBroadcast(this, 1, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            String label = pipPlaying ? "Pause" : "Play";
+            Icon icon = Icon.createWithResource(this,
+                    pipPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play);
+            actions.add(new RemoteAction(icon, label, label, pi));
+        }
+        return new PictureInPictureParams.Builder()
+                .setAspectRatio(new Rational(16, 9))
+                .setActions(actions)
+                .build();
+    }
+
+    // Refresh the play/pause icon while in the floating window
+    private void updatePip() {
+        if (Build.VERSION.SDK_INT < 26 || !isInPictureInPictureMode()) return;
+        try { setPictureInPictureParams(pipParams()); } catch (Exception ignored) {}
     }
 
     @Override
@@ -358,6 +432,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(checkPlayer);
+        if (receiverOn) {
+            try { unregisterReceiver(pipReceiver); } catch (Exception ignored) {}
+            receiverOn = false;
+        }
         if (web != null) {
             root.removeView(web);
             web.destroy();
