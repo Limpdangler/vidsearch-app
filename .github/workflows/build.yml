@@ -1,0 +1,87 @@
+name: Build app
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Unpack the signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::The signing key is missing. Add it in Settings > Secrets and variables > Actions as KEYSTORE_B64."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > release.jks
+
+      - name: Make the app icon and Fire TV banner
+        run: |
+          pip install --quiet pillow
+          mkdir -p res/mipmap-nodpi res/mipmap-anydpi-v26 res/drawable-nodpi
+          curl -fsSL -o /tmp/icon.png https://limpdangler.github.io/VidSearch/icon-512.png
+          curl -fsSL -o /tmp/bebas.ttf https://raw.githubusercontent.com/google/fonts/main/ofl/bebasneue/BebasNeue-Regular.ttf
+          python3 - <<'PY'
+          from PIL import Image, ImageDraw, ImageFont
+          icon = Image.open('/tmp/icon.png').convert('RGB')
+          icon.resize((192, 192), Image.LANCZOS).save('res/mipmap-nodpi/ic_launcher.png')
+          icon.resize((432, 432), Image.LANCZOS).save('res/drawable-nodpi/ic_fg.png')
+          W, H, k = 320, 180, 4
+          img = Image.new('RGB', (W * k, H * k), (10, 10, 10))
+          d = ImageDraw.Draw(img)
+          size = 400
+          while True:
+              f = ImageFont.truetype('/tmp/bebas.ttf', size)
+              a = d.textbbox((0, 0), 'VID', font=f); b = d.textbbox((0, 0), 'SEARCH', font=f)
+              width = (a[2] - a[0]) + (b[2] - b[0])
+              if width <= W * k * 0.82 or size < 40: break
+              size -= 10
+          top = min(a[1], b[1]); bottom = max(a[3], b[3])
+          x = (W * k - width) / 2; y = (H * k - (bottom - top)) / 2 - top
+          d.text((x - a[0], y), 'VID', font=f, fill=(240, 240, 240))
+          d.text((x + (a[2] - a[0]) - b[0], y), 'SEARCH', font=f, fill=(229, 56, 59))
+          img.resize((W, H), Image.LANCZOS).save('res/drawable-nodpi/banner.png')
+          PY
+          cat > res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@android:color/black" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
+          XML
+
+      - name: Build the app
+        run: gradle --no-daemon assembleRelease
+
+      - name: Name the file
+        run: cp build/outputs/apk/release/*-release.apk VidSearch.apk
+
+      - name: Publish the download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Vid Search app 1.0.${{ github.run_number }}
+          files: VidSearch.apk
+          make_latest: true
