@@ -10,6 +10,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.drawable.Icon;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -104,6 +106,10 @@ public class MainActivity extends Activity {
     private boolean receiverOn;
     private static final String ACTION_TOGGLE = "io.github.limpdangler.vidsearch.PIP_TOGGLE";
 
+    // Headphone buttons: the app registers as "the media player" so Android sends it
+    // play/pause presses, which are passed on to the website's player.
+    private MediaSession session;
+
     // The floating window's play/pause button sends this; we pass it on to the website
     private final BroadcastReceiver pipReceiver = new BroadcastReceiver() {
         @Override
@@ -115,6 +121,7 @@ public class MainActivity extends Activity {
                     if ("\"playing\"".equals(r)) pipPlaying = true;
                     else if ("\"paused\"".equals(r)) pipPlaying = false;
                     updatePip();
+                    updateSession();
                 });
         }
     };
@@ -152,6 +159,7 @@ public class MainActivity extends Activity {
                         pipPlaying = playing;
                         pipCanControl = control;
                         if (changed) updatePip();
+                        updateSession();
                     });
             }
             handler.postDelayed(this, 2000);
@@ -265,6 +273,17 @@ public class MainActivity extends Activity {
         }
         handler.postDelayed(checkPlayer, 2000);
 
+        // Headphone / Bluetooth play-pause button
+        session = new MediaSession(this, "VidSearch");
+        if (Build.VERSION.SDK_INT < 26) {
+            session.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
+        }
+        session.setCallback(new MediaSession.Callback() {
+            @Override public void onPlay()  { headphonePlayPause(true); }
+            @Override public void onPause() { headphonePlayPause(false); }
+            // Double-press ("next track") intentionally does nothing
+        });
+
         // Listen for the floating window's play/pause button
         if (Build.VERSION.SDK_INT >= 26) {
             IntentFilter filter = new IntentFilter(ACTION_TOGGLE);
@@ -306,6 +325,35 @@ public class MainActivity extends Activity {
                 .setAspectRatio(new Rational(16, 9))
                 .setActions(actions)
                 .build();
+    }
+
+    // A headphone press: play or pause the video
+    private void headphonePlayPause(boolean wantPlay) {
+        if (web == null) return;
+        boolean inPip = Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode();
+        web.evaluateJavascript(
+            "(function(){try{return vsPlayPause(" + wantPlay + "," + inPip + ");}catch(e){return 'none';}})()",
+            r -> {
+                if ("\"playing\"".equals(r)) pipPlaying = true;
+                else if ("\"paused\"".equals(r)) pipPlaying = false;
+                updatePip();
+                updateSession();
+            });
+    }
+
+    // Tell Android whether we're playing, so headphone presses come to us
+    // (only while a pausable video — VidNest / VidRift — is open)
+    private void updateSession() {
+        if (session == null) return;
+        boolean active = playerOpen && pipCanControl;
+        if (active) {
+            session.setPlaybackState(new PlaybackState.Builder()
+                    .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE)
+                    .setState(pipPlaying ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
+                              PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f)
+                    .build());
+        }
+        if (session.isActive() != active) session.setActive(active);
     }
 
     // Refresh the play/pause icon while in the floating window
@@ -432,6 +480,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(checkPlayer);
+        if (session != null) {
+            session.setActive(false);
+            session.release();
+            session = null;
+        }
         if (receiverOn) {
             try { unregisterReceiver(pipReceiver); } catch (Exception ignored) {}
             receiverOn = false;
