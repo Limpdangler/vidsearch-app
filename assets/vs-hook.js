@@ -2,10 +2,12 @@
 // The app adds this to every page and every box (iframe) inside it, before the
 // page's own code runs. Inside the video player's boxes it finds the main video
 // and lets Vid Search control it with standard video commands — it never touches
-// the player's own code, buttons or ads.
+// the player's own buttons or ads. It also passes the player's fullscreen button on
+// to Vid Search's fullscreen, so Skip intro and Up next stay on screen.
 //
-//   Vid Search -> helper:  { vsHookCmd: 'play' | 'pause' | 'seek' | 'state', t, token }
+//   Vid Search -> helper:  { vsHookCmd: 'play' | 'pause' | 'seek' | 'state' | 'fsAck' | 'fsFallback', t, token }
 //   helper -> Vid Search:  { vsHook: 'state', pos, dur, paused, ended, token }
+//                          { vsHook: 'fullscreen', token }
 //
 // __TOKEN__ is replaced by the app with a random code each time it starts, so
 // only Vid Search's own messages are obeyed.
@@ -20,6 +22,48 @@
   if (window === window.top) {
     try { window.VS_HOOK = { token: TOKEN, version: 1 }; } catch (e) {}
     return;
+  }
+
+  // ── Fullscreen: use Vid Search's instead of the player's ────
+  // The player's own fullscreen only enlarges the video, which hides Vid Search's
+  // Skip intro and Up next buttons. So when the player asks for fullscreen, ask Vid
+  // Search instead. If Vid Search doesn't answer within a moment (an older version of
+  // the site), or can't do it, the player gets its own fullscreen as normal.
+  var fsWait = null;   // { el, original, args, resolve, timer }
+
+  function fsOwn() {
+    var w = fsWait;
+    fsWait = null;
+    if (!w) return;
+    clearTimeout(w.timer);
+    try {
+      var r = w.original.apply(w.el, w.args);
+      if (r && r.then) r.then(w.resolve, w.resolve); else w.resolve();
+    } catch (e) { w.resolve(); }
+  }
+
+  function askVidSearch(el, original, args) {
+    if (fsWait) { clearTimeout(fsWait.timer); fsWait.resolve(); }
+    return new Promise(function (resolve) {
+      fsWait = { el: el, original: original, args: args, resolve: resolve,
+                 timer: setTimeout(fsOwn, 700) };
+      try { window.top.postMessage({ vsHook: 'fullscreen', token: TOKEN }, '*'); } catch (e) { fsOwn(); }
+    });
+  }
+
+  function catchFullscreen(proto, name) {
+    try {
+      var original = proto && proto[name];
+      if (typeof original !== 'function') return;
+      proto[name] = function () { return askVidSearch(this, original, arguments); };
+    } catch (e) {}
+  }
+  catchFullscreen(Element.prototype, 'requestFullscreen');
+  catchFullscreen(Element.prototype, 'webkitRequestFullscreen');
+  catchFullscreen(Element.prototype, 'webkitRequestFullScreen');
+  if (window.HTMLVideoElement) {
+    catchFullscreen(HTMLVideoElement.prototype, 'webkitEnterFullscreen');
+    catchFullscreen(HTMLVideoElement.prototype, 'webkitEnterFullScreen');
   }
 
   // ── Find the main video ─────────────────────────────────────
@@ -103,7 +147,18 @@
     }
     if (!m || typeof m !== 'object' || !m.vsHookCmd || m.token !== TOKEN) return;
 
-    var v = mainVideo();
+    var fsCmd = m.vsHookCmd === 'fsAck' || m.vsHookCmd === 'fsFallback';
+    if (m.vsHookCmd === 'fsAck' && fsWait) {          // Vid Search is handling it
+      var w = fsWait;
+      clearTimeout(w.timer);
+      w.resolve();
+      // keep it for a few seconds, in case Vid Search's fullscreen is refused
+      w.timer = setTimeout(function () { if (fsWait === w) fsWait = null; }, 3000);
+    } else if (m.vsHookCmd === 'fsFallback') {
+      fsOwn();                                       // Vid Search couldn't: use the player's own
+    }
+
+    var v = fsCmd ? null : mainVideo();
     if (v) {
       try {
         if (m.vsHookCmd === 'play') {
