@@ -135,7 +135,7 @@ public class MainActivity extends Activity {
     private long npPosMs = -1, npDurMs = 0;
     private boolean npHasNext;
     // The card's extra buttons (besides play/pause)
-    private static final String CMD_BACK = "back10", CMD_FWD = "fwd10", CMD_NEXT = "nextEp", CMD_TOGGLE = "toggle";
+    private static final String CMD_BACK = "back10", CMD_FWD = "fwd10", CMD_NEXT = "nextEp", CMD_TOGGLE = "toggle", CMD_GAP = "gap";
     private String metaShown = "", noteShown = "";
     private boolean channelMade, askedNotify;
 
@@ -414,6 +414,12 @@ public class MainActivity extends Activity {
                         CMD_FWD, "Forward 10 seconds", android.R.drawable.ic_media_ff).build());
             }
             if (npHasNext) {
+                // An empty gap first, so Next episode sits apart on the far right
+                // (and isn't pressed by mistake instead of Forward 10 seconds)
+                if (pipCanControl) {
+                    ps.addCustomAction(new PlaybackState.CustomAction.Builder(
+                            CMD_GAP, " ", R.drawable.blank).build());
+                }
                 ps.addCustomAction(new PlaybackState.CustomAction.Builder(
                         CMD_NEXT, "Next episode", android.R.drawable.ic_media_next).build());
             }
