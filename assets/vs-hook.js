@@ -175,6 +175,64 @@
   setInterval(scan, 1000);
   document.addEventListener('DOMContentLoaded', scan);
 
+  // ── Hide the player's controls after Vid Search presses play ──
+  // A paused player shows its controls. When Vid Search un-pauses it (e.g. from the
+  // floating window, where you can't touch the video), the player never notices you've
+  // "left", so its controls stay on top of the picture. Pretend the mouse moved and then
+  // left the player, which is what normally makes them fade away.
+  function fire(el, type, bubbles, x, y) {
+    try {
+      var Ctor = (type.indexOf('pointer') === 0 && window.PointerEvent) ? window.PointerEvent : window.MouseEvent;
+      el.dispatchEvent(new Ctor(type, { bubbles: bubbles, cancelable: true, view: window, clientX: x, clientY: y }));
+    } catch (e) {}
+  }
+  function hideControls() {
+    var v = mainVideo();
+    if (!v || v.paused) return;
+    var r = v.getBoundingClientRect();
+    var x = r.left + r.width / 2, y = r.top + r.height / 2;
+    fire(v, 'pointermove', true, x, y);
+    fire(v, 'mousemove', true, x, y);
+    setTimeout(function () {
+      fire(v, 'pointerout', true, x, y);
+      fire(v, 'mouseout', true, x, y);
+      for (var el = v; el && el !== document.documentElement; el = el.parentElement) {
+        fire(el, 'pointerleave', false, x, y);
+        fire(el, 'mouseleave', false, x, y);
+      }
+    }, 200);
+  }
+  function hideControlsSoon() {
+    setTimeout(hideControls, 600);
+    setTimeout(hideControls, 3000);
+  }
+
+  // ── Press the start button on a cover screen ────────────────
+  // Some players (vidsrc) open on a cover picture with a big play button, and only load
+  // the video once it's pressed. When Vid Search wants the video to start by itself, press
+  // it — once per box, and only if this box has no video of its own yet.
+  var START_BUTTONS = '#pl_but, .pl_but, #play-button, .play-button, #playbtn, .playbtn, .play-btn, ' +
+      '.btn-play, .vjs-big-play-button, .jw-display-icon-display, .plyr__control--overlaid, ' +
+      '[aria-label="Play"], [title="Play"]';
+  var startPressed = false;
+  function pressStart() {
+    if (startPressed || allVideos(document).length) return;
+    var list;
+    try { list = document.querySelectorAll(START_BUTTONS); } catch (e) { return; }
+    for (var i = 0; i < list.length; i++) {
+      var b = list[i], r = b.getBoundingClientRect();
+      if (r.width < 20 || r.height < 20) continue;       // hidden or tiny: not it
+      startPressed = true;
+      var x = r.left + r.width / 2, y = r.top + r.height / 2;
+      fire(b, 'pointerdown', true, x, y);
+      fire(b, 'mousedown', true, x, y);
+      fire(b, 'pointerup', true, x, y);
+      fire(b, 'mouseup', true, x, y);
+      try { b.click(); } catch (e) {}
+      return;
+    }
+  }
+
   // ── Obey Vid Search, and pass commands on to boxes inside this one ──
   window.addEventListener('message', function (e) {
     var m = e.data;
@@ -195,16 +253,20 @@
       fsOwn();                                       // Vid Search couldn't: use the player's own
     }
 
-    var v = fsCmd ? null : mainVideo();
+    if (m.vsHookCmd === 'start') pressStart();
+
+    var v = (fsCmd || m.vsHookCmd === 'start') ? null : mainVideo();
     if (v) {
       try {
         if (m.vsHookCmd === 'play') {
           var p = v.play();
           if (p && p.catch) p.catch(function () {});
+          hideControlsSoon();
         } else if (m.vsHookCmd === 'pause') {
           v.pause();
         } else if (m.vsHookCmd === 'seek' && isFinite(m.t)) {
           v.currentTime = Math.max(0, m.t);
+          hideControlsSoon();
         }
       } catch (err) {}
       report(true);
