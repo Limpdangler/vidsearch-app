@@ -1,6 +1,10 @@
 package io.github.limpdangler.vidsearch;
 
+import android.Manifest;
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.PictureInPictureParams;
 import android.app.RemoteAction;
@@ -10,6 +14,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.drawable.Icon;
+import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.content.pm.ActivityInfo;
@@ -36,6 +41,9 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
@@ -118,11 +126,26 @@ public class MainActivity extends Activity {
     // play/pause presses, which are passed on to the website's player.
     private MediaSession session;
 
+    // "Now playing" card in the notification shade (phones only): title, episode,
+    // play/pause and a progress bar you can drag, like in the browser
+    private static final String ACTION_MEDIA = "io.github.limpdangler.vidsearch.MEDIA_TOGGLE";
+    private static final String CHANNEL = "now_playing";
+    private static final int NOTE_ID = 7;
+    private String npTitle = "", npEp = "";
+    private long npPosMs = -1, npDurMs = 0;
+    private String metaShown = "", noteShown = "";
+    private boolean channelMade, askedNotify;
+
     // The floating window's play/pause button sends this; we pass it on to the website
     private final BroadcastReceiver pipReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (web == null || !ACTION_TOGGLE.equals(intent.getAction())) return;
+            if (web == null) return;
+            if (ACTION_MEDIA.equals(intent.getAction())) {   // notification's play/pause button
+                headphonePlayPause(!pipPlaying);
+                return;
+            }
+            if (!ACTION_TOGGLE.equals(intent.getAction())) return;
             web.evaluateJavascript(
                 "(function(){try{return vsPipToggle();}catch(e){return 'none';}})()",
                 r -> {
@@ -154,11 +177,17 @@ public class MainActivity extends Activity {
         public void run() {
             if (web != null) {
                 // '0' = nothing playing; otherwise 3 digits: open, playing, can-control
+                // Second line: title, episode, position and length (for the notification card)
                 web.evaluateJavascript(
-                    "(function(){try{if(typeof vsPipState==='function')return vsPipState();" +
-                    "return (typeof current!=='undefined'&&current)?'100':'0';}catch(e){return '0';}})()",
+                    "(function(){try{var s=(typeof vsPipState==='function')?vsPipState():" +
+                    "((typeof current!=='undefined'&&current)?'100':'0');var n='';" +
+                    "try{if(typeof vsNowPlaying==='function')n=vsNowPlaying();}catch(e){}" +
+                    "return s+'\\n'+n;}catch(e){return '0';}})()",
                     r -> {
-                        String s = r == null ? "" : r.replace("\"", "");
+                        String all = jsString(r);
+                        int nl = all.indexOf('\n');
+                        String s = nl < 0 ? all : all.substring(0, nl);
+                        readNowPlaying(nl < 0 ? "" : all.substring(nl + 1));
                         boolean open = s.startsWith("1");
                         boolean playing = open && s.length() > 1 && s.charAt(1) == '1';
                         boolean control = open && s.length() > 2 && s.charAt(2) == '1';
@@ -291,12 +320,14 @@ public class MainActivity extends Activity {
         session.setCallback(new MediaSession.Callback() {
             @Override public void onPlay()  { headphonePlayPause(true); }
             @Override public void onPause() { headphonePlayPause(false); }
+            @Override public void onSeekTo(long ms) { seekTo(ms); }
             // Double-press ("next track") intentionally does nothing
         });
 
         // Listen for the floating window's play/pause button
         if (Build.VERSION.SDK_INT >= 26) {
             IntentFilter filter = new IntentFilter(ACTION_TOGGLE);
+            filter.addAction(ACTION_MEDIA);
             if (Build.VERSION.SDK_INT >= 33) registerReceiver(pipReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
             else registerReceiver(pipReceiver, filter);
             receiverOn = true;
@@ -351,19 +382,127 @@ public class MainActivity extends Activity {
             });
     }
 
-    // Tell Android whether we're playing, so headphone presses come to us
-    // (only while a pausable video — VidNest / VidRift — is open)
+    // Tell Android what's playing: headphone presses then come to us, and the
+    // notification shade shows the "now playing" card
     private void updateSession() {
         if (session == null) return;
-        boolean active = playerOpen && pipCanControl;
+        boolean active = playerOpen;
         if (active) {
+            String meta = npTitle + "\n" + npEp + "\n" + npDurMs;
+            if (!meta.equals(metaShown)) {
+                metaShown = meta;
+                MediaMetadata.Builder m = new MediaMetadata.Builder()
+                        .putString(MediaMetadata.METADATA_KEY_TITLE, npTitle.isEmpty() ? "Vid Search" : npTitle)
+                        .putString(MediaMetadata.METADATA_KEY_ARTIST, npEp);
+                if (npDurMs > 0) m.putLong(MediaMetadata.METADATA_KEY_DURATION, npDurMs);
+                session.setMetadata(m.build());
+            }
+            long actions = 0;
+            if (pipCanControl) {
+                actions = PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE;
+                if (npDurMs > 0) actions |= PlaybackState.ACTION_SEEK_TO;
+            }
             session.setPlaybackState(new PlaybackState.Builder()
-                    .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE)
+                    .setActions(actions)
                     .setState(pipPlaying ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
-                              PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f)
+                              npPosMs >= 0 ? npPosMs : PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                              pipPlaying ? 1f : 0f)
                     .build());
         }
         if (session.isActive() != active) session.setActive(active);
+        updateNotification();
+    }
+
+    // The "now playing" card in the notification shade (phones; not Fire TV)
+    private void updateNotification() {
+        if (isTv || Build.VERSION.SDK_INT < 26 || session == null) return;
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm == null) return;
+        if (!playerOpen) {
+            if (!noteShown.isEmpty()) { nm.cancel(NOTE_ID); noteShown = ""; }
+            return;
+        }
+        String key = npTitle + "\n" + npEp + "\n" + pipPlaying + pipCanControl;
+        if (key.equals(noteShown)) return;          // nothing changed
+
+        // Android 13+ asks once whether Vid Search may show notifications
+        if (Build.VERSION.SDK_INT >= 33 && !askedNotify
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            askedNotify = true;
+            if (!getPreferences(MODE_PRIVATE).getBoolean("askedNotify", false)) {
+                getPreferences(MODE_PRIVATE).edit().putBoolean("askedNotify", true).apply();
+                try { requestPermissions(new String[]{ Manifest.permission.POST_NOTIFICATIONS }, 1); } catch (Exception ignored) {}
+            }
+        }
+        if (!channelMade) {
+            NotificationChannel ch = new NotificationChannel(CHANNEL, "Now playing", NotificationManager.IMPORTANCE_LOW);
+            ch.setShowBadge(false);
+            nm.createNotificationChannel(ch);
+            channelMade = true;
+        }
+
+        // Tapping the card opens the app
+        Intent open = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent openPi = PendingIntent.getActivity(this, 2, open,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Notification.MediaStyle style = new Notification.MediaStyle().setMediaSession(session.getSessionToken());
+        Notification.Builder b = new Notification.Builder(this, CHANNEL)
+                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setContentTitle(npTitle.isEmpty() ? "Vid Search" : npTitle)
+                .setContentText(npEp)
+                .setContentIntent(openPi)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .setOngoing(pipPlaying);
+        if (pipCanControl) {
+            PendingIntent pi = PendingIntent.getBroadcast(this, 3,
+                    new Intent(ACTION_MEDIA).setPackage(getPackageName()),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            String label = pipPlaying ? "Pause" : "Play";
+            Icon icon = Icon.createWithResource(this,
+                    pipPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play);
+            b.addAction(new Notification.Action.Builder(icon, label, pi).build());
+            style.setShowActionsInCompactView(0);
+        }
+        b.setStyle(style);
+        try {
+            nm.notify(NOTE_ID, b.build());
+            noteShown = key;
+        } catch (Exception ignored) {
+            // Notifications switched off for the app
+        }
+    }
+
+    // Title, episode, position and length from the website (blank if nothing / older site)
+    private void readNowPlaying(String json) {
+        try {
+            if (json == null || json.isEmpty()) {
+                npTitle = ""; npEp = ""; npPosMs = -1; npDurMs = 0;
+                return;
+            }
+            JSONObject o = new JSONObject(json);
+            npTitle = o.optString("t", "");
+            npEp = o.optString("e", "");
+            npPosMs = (long) (o.optDouble("pos", -1) * 1000);
+            npDurMs = (long) (o.optDouble("dur", 0) * 1000);
+        } catch (Exception ignored) {}
+    }
+
+    // Dragging the progress bar on the notification card
+    private void seekTo(long ms) {
+        if (web == null) return;
+        long secs = Math.max(0, ms / 1000);
+        web.evaluateJavascript("(function(){try{return vsSeekTo(" + secs + ");}catch(e){return 'none';}})()", null);
+        npPosMs = secs * 1000;
+        updateSession();
+    }
+
+    // Turns the website's answer ("\"text\"" in quotes) back into plain text
+    private static String jsString(String r) {
+        if (r == null || r.equals("null")) return "";
+        try { return new JSONArray("[" + r + "]").optString(0, ""); } catch (Exception e) { return ""; }
     }
 
     // Refresh the play/pause icon while in the floating window
@@ -522,6 +661,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(checkPlayer);
+        if (Build.VERSION.SDK_INT >= 26 && !noteShown.isEmpty()) {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.cancel(NOTE_ID);
+        }
         if (session != null) {
             session.setActive(false);
             session.release();
