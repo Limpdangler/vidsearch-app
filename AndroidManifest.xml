@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The "now playing" card in the notification shade (Android 13+ asks once) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Works on phones and on TVs (Fire TV) without a touchscreen -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
