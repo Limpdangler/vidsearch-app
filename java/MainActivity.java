@@ -37,9 +37,17 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
+
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.HashSet;
 import java.util.Locale;
@@ -268,6 +276,8 @@ public class MainActivity extends Activity {
             }
         });
 
+        addPlayerHelper();
+
         if (savedState == null || web.restoreState(savedState) == null) {
             web.loadUrl(HOME);
         }
@@ -372,6 +382,38 @@ public class MainActivity extends Activity {
         } else {
             pipJustEnded = true;
             web.evaluateJavascript(PIP_OFF_JS, null);
+        }
+    }
+
+    // Player helper (assets/vs-hook.js): added to every page and every box inside it
+    // before their own code runs, so Vid Search can play / pause / jump the video in
+    // any source. Needs a reasonably recent Android System WebView; if it's not
+    // supported, nothing is added and Vid Search simply doesn't offer the feature.
+    private void addPlayerHelper() {
+        try {
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return;
+            String script = readAsset("vs-hook.js");
+            if (script == null) return;
+            byte[] random = new byte[16];
+            new SecureRandom().nextBytes(random);
+            StringBuilder token = new StringBuilder();
+            for (byte b : random) token.append(String.format(Locale.ROOT, "%02x", b));
+            script = script.replace("__TOKEN__", token.toString());
+            WebViewCompat.addDocumentStartJavaScript(web, script, Collections.singleton("*"));
+        } catch (Exception ignored) {
+            // Not available on this device — the website falls back to its normal behaviour
+        }
+    }
+
+    private String readAsset(String name) {
+        try (InputStream in = getAssets().open(name)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
         }
     }
 
