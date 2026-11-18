@@ -51,11 +51,28 @@
     });
   }
 
+  // Some players check whether built-in functions have been changed. Make the
+  // replacements look exactly like the originals if they look.
+  var disguise = typeof WeakMap === 'function' ? new WeakMap() : null;
+  if (disguise) {
+    try {
+      var realToString = Function.prototype.toString;
+      var fakeToString = function toString() {
+        return realToString.call((disguise.get(this)) || this);
+      };
+      disguise.set(fakeToString, realToString);
+      Function.prototype.toString = fakeToString;
+    } catch (e) { disguise = null; }
+  }
+
   function catchFullscreen(proto, name) {
     try {
       var original = proto && proto[name];
       if (typeof original !== 'function') return;
-      proto[name] = function () { return askVidSearch(this, original, arguments); };
+      var replacement = function () { return askVidSearch(this, original, arguments); };
+      try { Object.defineProperty(replacement, 'name', { value: original.name }); } catch (e) {}
+      if (disguise) disguise.set(replacement, original);
+      proto[name] = replacement;
     } catch (e) {}
   }
   catchFullscreen(Element.prototype, 'requestFullscreen');
@@ -91,12 +108,23 @@
     var best = null, bestScore = -1;
     for (var i = 0; i < vids.length; i++) {
       var v = vids[i];
-      var d = isFinite(v.duration) ? v.duration : 0;
+      var d = videoLength(v);
       var r = v.getBoundingClientRect();
       var score = d * 100000 + r.width * r.height;
       if (score > bestScore) { best = v; bestScore = score; }
     }
     return best;
+  }
+
+  // Length of the video. Some streams say "unknown" (infinite): then use how far
+  // you can jump to instead.
+  function videoLength(v) {
+    if (isFinite(v.duration) && v.duration > 0) return v.duration;
+    try {
+      var s = v.seekable;
+      if (s && s.length) { var end = s.end(s.length - 1); if (isFinite(end)) return end; }
+    } catch (e) {}
+    return 0;
   }
 
   // ── Report to Vid Search ────────────────────────────────────
@@ -112,7 +140,7 @@
         vsHook: 'state',
         token: TOKEN,
         pos: v.currentTime || 0,
-        dur: isFinite(v.duration) ? v.duration : 0,
+        dur: videoLength(v),
         paused: !!v.paused,
         ended: !!v.ended
       }, '*');
@@ -129,9 +157,18 @@
     v.addEventListener('timeupdate', function () { report(false); });
   }
 
+  // Say hello to Vid Search (so it can show "connected" / "no video found")
+  var helloCount = -1;
+  function hello(n) {
+    if (n === helloCount) return;
+    helloCount = n;
+    try { window.top.postMessage({ vsHook: 'hello', token: TOKEN, videos: n }, '*'); } catch (e) {}
+  }
+
   function scan() {
     var vids = allVideos(document);
     for (var i = 0; i < vids.length; i++) watch(vids[i]);
+    hello(vids.length);
   }
 
   // Players often add their video later, so keep an eye out
