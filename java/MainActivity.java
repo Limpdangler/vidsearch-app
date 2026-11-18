@@ -133,6 +133,9 @@ public class MainActivity extends Activity {
     private static final int NOTE_ID = 7;
     private String npTitle = "", npEp = "";
     private long npPosMs = -1, npDurMs = 0;
+    private boolean npHasNext;
+    // The card's extra buttons (besides play/pause)
+    private static final String CMD_BACK = "back10", CMD_FWD = "fwd10", CMD_NEXT = "nextEp", CMD_TOGGLE = "toggle";
     private String metaShown = "", noteShown = "";
     private boolean channelMade, askedNotify;
 
@@ -141,8 +144,8 @@ public class MainActivity extends Activity {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (web == null) return;
-            if (ACTION_MEDIA.equals(intent.getAction())) {   // notification's play/pause button
-                headphonePlayPause(!pipPlaying);
+            if (ACTION_MEDIA.equals(intent.getAction())) {   // a button on the notification card
+                mediaCommand(intent.getStringExtra("cmd"));
                 return;
             }
             if (!ACTION_TOGGLE.equals(intent.getAction())) return;
@@ -321,6 +324,7 @@ public class MainActivity extends Activity {
             @Override public void onPlay()  { headphonePlayPause(true); }
             @Override public void onPause() { headphonePlayPause(false); }
             @Override public void onSeekTo(long ms) { seekTo(ms); }
+            @Override public void onCustomAction(String action, Bundle extras) { mediaCommand(action); }
             // Double-press ("next track") intentionally does nothing
         });
 
@@ -398,11 +402,22 @@ public class MainActivity extends Activity {
                 session.setMetadata(m.build());
             }
             long actions = 0;
+            PlaybackState.Builder ps = new PlaybackState.Builder();
             if (pipCanControl) {
                 actions = PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE;
                 if (npDurMs > 0) actions |= PlaybackState.ACTION_SEEK_TO;
+                // Android puts the first two extra buttons where "previous" and "next" would go,
+                // i.e. either side of play/pause
+                ps.addCustomAction(new PlaybackState.CustomAction.Builder(
+                        CMD_BACK, "Back 10 seconds", android.R.drawable.ic_media_rew).build());
+                ps.addCustomAction(new PlaybackState.CustomAction.Builder(
+                        CMD_FWD, "Forward 10 seconds", android.R.drawable.ic_media_ff).build());
             }
-            session.setPlaybackState(new PlaybackState.Builder()
+            if (npHasNext) {
+                ps.addCustomAction(new PlaybackState.CustomAction.Builder(
+                        CMD_NEXT, "Next episode", android.R.drawable.ic_media_next).build());
+            }
+            session.setPlaybackState(ps
                     .setActions(actions)
                     .setState(pipPlaying ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
                               npPosMs >= 0 ? npPosMs : PlaybackState.PLAYBACK_POSITION_UNKNOWN,
@@ -422,7 +437,7 @@ public class MainActivity extends Activity {
             if (!noteShown.isEmpty()) { nm.cancel(NOTE_ID); noteShown = ""; }
             return;
         }
-        String key = npTitle + "\n" + npEp + "\n" + pipPlaying + pipCanControl;
+        String key = npTitle + "\n" + npEp + "\n" + pipPlaying + pipCanControl + npHasNext;
         if (key.equals(noteShown)) return;          // nothing changed
 
         // Android 13+ asks once whether Vid Search may show notifications
@@ -456,16 +471,15 @@ public class MainActivity extends Activity {
                 .setOnlyAlertOnce(true)
                 .setShowWhen(false)
                 .setOngoing(pipPlaying);
+        // (Android 13+ draws its own buttons from the media session above; older versions use these)
         if (pipCanControl) {
-            PendingIntent pi = PendingIntent.getBroadcast(this, 3,
-                    new Intent(ACTION_MEDIA).setPackage(getPackageName()),
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            String label = pipPlaying ? "Pause" : "Play";
-            Icon icon = Icon.createWithResource(this,
-                    pipPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play);
-            b.addAction(new Notification.Action.Builder(icon, label, pi).build());
-            style.setShowActionsInCompactView(0);
+            b.addAction(cardButton(3, CMD_BACK, "Back 10 seconds", android.R.drawable.ic_media_rew));
+            b.addAction(cardButton(4, CMD_TOGGLE, pipPlaying ? "Pause" : "Play",
+                    pipPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play));
+            b.addAction(cardButton(5, CMD_FWD, "Forward 10 seconds", android.R.drawable.ic_media_ff));
+            style.setShowActionsInCompactView(0, 1, 2);
         }
+        if (npHasNext) b.addAction(cardButton(6, CMD_NEXT, "Next episode", android.R.drawable.ic_media_next));
         b.setStyle(style);
         try {
             nm.notify(NOTE_ID, b.build());
@@ -475,11 +489,42 @@ public class MainActivity extends Activity {
         }
     }
 
+    private Notification.Action cardButton(int code, String cmd, String label, int icon) {
+        PendingIntent pi = PendingIntent.getBroadcast(this, code,
+                new Intent(ACTION_MEDIA).setPackage(getPackageName()).putExtra("cmd", cmd),
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Action.Builder(Icon.createWithResource(this, icon), label, pi).build();
+    }
+
+    // A button on the notification card
+    private void mediaCommand(String cmd) {
+        if (web == null || cmd == null) return;
+        switch (cmd) {
+            case CMD_TOGGLE: headphonePlayPause(!pipPlaying); break;
+            case CMD_BACK:   jump(-10); break;
+            case CMD_FWD:    jump(10); break;
+            case CMD_NEXT:
+                web.evaluateJavascript("(function(){try{return vsNextEp();}catch(e){return 'none';}})()", null);
+                break;
+            default: break;
+        }
+    }
+
+    // Back / forward a few seconds
+    private void jump(int secs) {
+        web.evaluateJavascript("(function(){try{return vsSkipBy(" + secs + ");}catch(e){return 'none';}})()", null);
+        if (npPosMs >= 0) {
+            npPosMs = Math.max(0, npPosMs + secs * 1000L);
+            if (npDurMs > 0) npPosMs = Math.min(npPosMs, npDurMs);
+        }
+        updateSession();
+    }
+
     // Title, episode, position and length from the website (blank if nothing / older site)
     private void readNowPlaying(String json) {
         try {
             if (json == null || json.isEmpty()) {
-                npTitle = ""; npEp = ""; npPosMs = -1; npDurMs = 0;
+                npTitle = ""; npEp = ""; npPosMs = -1; npDurMs = 0; npHasNext = false;
                 return;
             }
             JSONObject o = new JSONObject(json);
@@ -487,6 +532,7 @@ public class MainActivity extends Activity {
             npEp = o.optString("e", "");
             npPosMs = (long) (o.optDouble("pos", -1) * 1000);
             npDurMs = (long) (o.optDouble("dur", 0) * 1000);
+            npHasNext = o.optBoolean("next", false);
         } catch (Exception ignored) {}
     }
 
