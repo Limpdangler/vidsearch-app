@@ -21,6 +21,7 @@ android {
             manifest.srcFile 'AndroidManifest.xml'
             java.srcDirs = ['java']
             res.srcDirs = ['res']
+            assets.srcDirs = ['assets']
         }
     }
 
@@ -49,4 +50,8 @@ android {
         abortOnError false
         checkReleaseBuilds false
     }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
 }
