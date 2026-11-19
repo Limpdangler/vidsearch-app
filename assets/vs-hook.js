@@ -9,7 +9,8 @@
 //   helper -> Vid Search:  { vsHook: 'state', pos, dur, paused, ended, token }
 //                          { vsHook: 'fullscreen', token }
 //                          { vsHook: 'key', key, token }        (TV remote arrows pressed inside the player)
-//                          { vsHook: 'dbltap', secs, token }    (double-tap on the left / right of the video)
+//                          { vsHook: 'dbltap', side, secs, token }  (double-tap: left -1 / middle 0 / right 1)
+//                          { vsHook: 'tap', token }             (you touched the player)
 //
 // __TOKEN__ is replaced by the app with a random code each time it starts, so
 // only Vid Search's own messages are obeyed.
@@ -85,6 +86,33 @@
     catchFullscreen(HTMLVideoElement.prototype, 'webkitEnterFullscreen');
     catchFullscreen(HTMLVideoElement.prototype, 'webkitEnterFullScreen');
   }
+
+  // ── Pop-ups: refuse them quietly, inside the player ─────────
+  // Players like vidsrc lay an invisible ad layer over the video after a few minutes,
+  // so your next tap tries to open an ad. The app already blocks the ad, but just
+  // trying to open a new window makes Android drop out of fullscreen. Refusing it here,
+  // before it gets that far, keeps you in fullscreen. Nothing in a player needs one.
+  try {
+    var noPopup = function open() { return null; };
+    if (disguise) disguise.set(noPopup, window.open);
+    window.open = noPopup;
+  } catch (e) {}
+  // Links that would open in a new window (or take over the whole page) do nothing
+  window.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var t = (a.getAttribute('target') || '').toLowerCase();
+    if (t && t !== '_self') e.preventDefault();
+  }, true);
+  // Tell Vid Search when you tap inside the player (so it can put you back into
+  // fullscreen if something knocks you out of it)
+  var lastTapSent = 0;
+  window.addEventListener('pointerdown', function () {
+    var now = Date.now();
+    if (now - lastTapSent < 400) return;
+    lastTapSent = now;
+    try { window.top.postMessage({ vsHook: 'tap', token: TOKEN }, '*'); } catch (e) {}
+  }, true);
 
   // ── Find the main video ─────────────────────────────────────
   // Some players hide their video inside "shadow" sections, so look there too.
