@@ -5,7 +5,8 @@
 // the player's own buttons or ads. It also passes the player's fullscreen button on
 // to Vid Search's fullscreen, so Skip intro and Up next stay on screen.
 //
-//   Vid Search -> helper:  { vsHookCmd: 'play' | 'pause' | 'seek' | 'state' | 'fsAck' | 'fsFallback', t, token }
+//   Vid Search -> helper:  { vsHookCmd: 'play' | 'pause' | 'seek' | 'state' | 'fsAck' | 'fsFallback'
+//                                       | 'start' | 'lock', t, token }
 //   helper -> Vid Search:  { vsHook: 'state', pos, dur, paused, ended, token }
 //                          { vsHook: 'fullscreen', token }
 //                          { vsHook: 'key', key, token }        (TV remote arrows pressed inside the player)
@@ -127,6 +128,75 @@
     if (now - lastTapSent < 400) return;
     lastTapSent = now;
     try { window.top.postMessage({ vsHook: 'tap', token: TOKEN }, '*'); } catch (e) {}
+  }, true);
+
+  // ── Once the video is playing: lock the player down ─────────
+  // Ad scripts sometimes drop an ad web page over the video, or send the player's box
+  // off to an ad site. Once Vid Search says the video is playing, the player has
+  // everything it needs, so from then on, in every box inside the player:
+  //   - new boxes (iframes) are removed as soon as they appear
+  //   - nothing can switch a box to a different website (by script or by a tap)
+  // Before that, nothing is touched, so players can set themselves up normally.
+  var lockedDown = false;
+
+  // "example.co.uk" style: the last two parts of the name (three for .co.uk etc.)
+  function siteOf(host) {
+    host = (host || '').toLowerCase();
+    var parts = host.split('.');
+    if (parts.length <= 2) return host;
+    var two = parts.slice(-2).join('.');
+    if (/^(co|com|org|net|gov|ac|edu)\.[a-z]{2}$/.test(two)) return parts.slice(-3).join('.');
+    return two;
+  }
+  function otherSite(url) {
+    try {
+      var u = new URL(url, location.href);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return true;
+      return siteOf(u.hostname) !== siteOf(location.hostname);
+    } catch (e) { return false; }
+  }
+
+  function killFrame(f) {
+    try { f.style.setProperty('display', 'none', 'important'); } catch (e) {}
+    try { f.src = 'about:blank'; } catch (e) {}
+    try { f.remove(); } catch (e) {}
+  }
+  function killFramesIn(node) {
+    if (!node || node.nodeType !== 1) return;
+    if (node.tagName === 'IFRAME' || node.tagName === 'FRAME' || node.tagName === 'OBJECT' || node.tagName === 'EMBED') { killFrame(node); return; }
+    try {
+      var list = node.querySelectorAll('iframe, frame, object, embed');
+      for (var i = 0; i < list.length; i++) killFrame(list[i]);
+    } catch (e) {}
+  }
+
+  function lockDown() {
+    if (lockedDown) return;
+    lockedDown = true;
+    try {
+      new MutationObserver(function (muts) {
+        for (var i = 0; i < muts.length; i++) {
+          var m = muts[i];
+          if (m.type === 'attributes') { if (m.target.tagName === 'IFRAME') killFrame(m.target); continue; }
+          for (var j = 0; j < m.addedNodes.length; j++) killFramesIn(m.addedNodes[j]);
+        }
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+    } catch (e) {}
+    // Script trying to move this box to another website
+    try {
+      if (window.navigation && navigation.addEventListener) {
+        navigation.addEventListener('navigate', function (e) {
+          if (!e.destination || e.hashChange) return;
+          if (e.cancelable && otherSite(e.destination.url)) e.preventDefault();
+        });
+      }
+    } catch (e) {}
+  }
+  // Taps on links to another website (once locked down)
+  window.addEventListener('click', function (e) {
+    if (!lockedDown) return;
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (a && otherSite(a.href)) e.preventDefault();
   }, true);
 
   // ── Find the main video ─────────────────────────────────────
@@ -350,8 +420,9 @@
     }
 
     if (m.vsHookCmd === 'start') pressStart();
+    if (m.vsHookCmd === 'lock') lockDown();
 
-    var v = (fsCmd || m.vsHookCmd === 'start') ? null : mainVideo();
+    var v = (fsCmd || m.vsHookCmd === 'start' || m.vsHookCmd === 'lock') ? null : mainVideo();
     if (v) {
       try {
         if (m.vsHookCmd === 'play') {
