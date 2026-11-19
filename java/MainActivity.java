@@ -236,8 +236,8 @@ public class MainActivity extends Activity {
         s.setJavaScriptCanOpenWindowsAutomatically(false);
         s.setAllowFileAccess(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        // Lets the website know it's running inside the app
-        s.setUserAgentString(s.getUserAgentString() + " VidSearchApp/1");
+        // Lets the website know it's running inside the app (and on a TV, for the TV layout)
+        s.setUserAgentString(s.getUserAgentString() + " VidSearchApp/1" + (isTv ? " VidSearchTV/1" : ""));
 
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
@@ -292,6 +292,9 @@ public class MainActivity extends Activity {
                 root.addView(view, new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 web.setVisibility(View.GONE);
+                // So the TV remote's buttons keep reaching Vid Search while fullscreen
+                view.setFocusable(true);
+                view.requestFocus();
                 immersive(true);
                 if (!isTv) setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
             }
@@ -654,7 +657,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    // Back button: leave fullscreen, then close the player, then exit the app
+    // Back button: leave fullscreen, then close the profile screen, then the player, then exit the app
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
@@ -663,7 +666,8 @@ public class MainActivity extends Activity {
             return;
         }
         web.evaluateJavascript(
-            "(function(){try{if(typeof current!=='undefined'&&current){closePlayer();return 'closed';}}catch(e){}return 'none';})()",
+            "(function(){try{if(typeof vsBack==='function'&&vsBack())return 'closed';" +
+            "if(typeof current!=='undefined'&&current){closePlayer();return 'closed';}}catch(e){}return 'none';})()",
             result -> {
                 if (!"\"closed\"".equals(result)) {
                     if (web.canGoBack()) web.goBack();
