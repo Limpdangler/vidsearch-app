@@ -255,8 +255,10 @@
     }, true);
   }
 
-  // ── Double-tap the video's left / right side: back / forward 10 seconds ──
-  // Like YouTube: each extra quick tap on the same side jumps another 10 seconds. The
+  // ── Double-tap the video ──
+  // Tells Vid Search which third was double-tapped (left / middle / right); Vid Search
+  // decides what that does (fullscreen, jump 10 seconds, pause / play). Like YouTube,
+  // each extra quick tap on the left or right counts again. The
   // second tap is kept from the player, so it doesn't also count it as a double-click
   // (which many players use for fullscreen).
   var lastTap = { t: 0, side: 0 };
@@ -269,12 +271,13 @@
     if (!w) return;
     var side = t.clientX < w / 3 ? -1 : (t.clientX > w * 2 / 3 ? 1 : 0);
     var now = Date.now();
-    if (side && side === lastTap.side && now - lastTap.t < 350) {
-      lastTap.t = now;
+    if (side === lastTap.side && now - lastTap.t < 350) {
+      // Middle: a third tap starts afresh (so it doesn't pause and un-pause straight away)
+      if (side === 0) lastTap = { t: 0, side: 9 }; else lastTap.t = now;
       tapGuardUntil = now + 600;
       e.preventDefault();
       e.stopImmediatePropagation();
-      try { window.top.postMessage({ vsHook: 'dbltap', secs: side * 10, token: TOKEN }, '*'); } catch (err) {}
+      try { window.top.postMessage({ vsHook: 'dbltap', side: side, secs: side * 10, token: TOKEN }, '*'); } catch (err) {}
     } else {
       lastTap = { t: now, side: side };
     }
