@@ -331,22 +331,37 @@
       '.btn-play, .vjs-big-play-button, .jw-display-icon-display, .plyr__control--overlaid, ' +
       '[aria-label="Play"], [title="Play"]';
   var startPressed = false;
+  function pressIt(b) {
+    var r = b.getBoundingClientRect();
+    var x = r.left + r.width / 2, y = r.top + r.height / 2;
+    fire(b, 'pointerdown', true, x, y);
+    fire(b, 'mousedown', true, x, y);
+    fire(b, 'pointerup', true, x, y);
+    fire(b, 'mouseup', true, x, y);
+    try { b.click(); } catch (e) {}
+  }
   function pressStart() {
     if (startPressed || allVideos(document).length) return;
     var list;
     try { list = document.querySelectorAll(START_BUTTONS); } catch (e) { return; }
     for (var i = 0; i < list.length; i++) {
-      var b = list[i], r = b.getBoundingClientRect();
+      var r = list[i].getBoundingClientRect();
       if (r.width < 20 || r.height < 20) continue;       // hidden or tiny: not it
       startPressed = true;
-      var x = r.left + r.width / 2, y = r.top + r.height / 2;
-      fire(b, 'pointerdown', true, x, y);
-      fire(b, 'mousedown', true, x, y);
-      fire(b, 'pointerup', true, x, y);
-      fire(b, 'mouseup', true, x, y);
-      try { b.click(); } catch (e) {}
+      pressIt(list[i]);
       return;
     }
+    // Didn't recognise a button: press whatever's in the middle of the cover, which is
+    // where the big play button goes. Only on a cover with a picture and no inner boxes.
+    try {
+      var w = innerWidth, h = innerHeight;
+      if (w < 200 || h < 120 || document.querySelector('iframe')) return;
+      var mid = document.elementFromPoint(w / 2, h / 2);
+      if (!mid || mid === document.body || mid === document.documentElement) return;
+      if (mid.closest && mid.closest('a[href]')) return;  // a link: could be an ad
+      startPressed = true;
+      pressIt(mid);
+    } catch (e) {}
   }
 
   // ── TV remote: arrows go to Vid Search, not the player ─────
