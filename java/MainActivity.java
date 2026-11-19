@@ -29,6 +29,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.util.Rational;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -655,6 +656,22 @@ public class MainActivity extends Activity {
         } else {
             d.setSystemUiVisibility(0);
         }
+    }
+
+    // Fire TV remote: ≡ (menu) = fullscreen on/off, ⏪ ⏩ = back / forward 10 seconds.
+    // Handled here so they work wherever the highlight is.
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        int code = e.getKeyCode();
+        String js = null;
+        if (code == KeyEvent.KEYCODE_MENU) js = "vsToggleFullscreen()";
+        else if (code == KeyEvent.KEYCODE_MEDIA_REWIND) js = "vsJump(-10)";
+        else if (code == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) js = "vsJump(10)";
+        if (js == null || web == null) return super.dispatchKeyEvent(e);
+        if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
+            web.evaluateJavascript("(function(){try{" + js + ";}catch(err){}})()", null);
+        }
+        return true;
     }
 
     // Back button: leave fullscreen, then close the profile screen, then the player, then exit the app
