@@ -317,6 +317,7 @@ public class MainActivity extends Activity {
         if (savedState == null || web.restoreState(savedState) == null) {
             web.loadUrl(HOME);
         }
+        askForNotificationsOnce();
         handler.postDelayed(checkPlayer, 2000);
 
         // Headphone / Bluetooth play-pause button
@@ -450,15 +451,6 @@ public class MainActivity extends Activity {
         String key = npTitle + "\n" + npEp + "\n" + pipPlaying + pipCanControl + npHasNext;
         if (key.equals(noteShown)) return;          // nothing changed
 
-        // Android 13+ asks once whether Vid Search may show notifications
-        if (Build.VERSION.SDK_INT >= 33 && !askedNotify
-                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            askedNotify = true;
-            if (!getPreferences(MODE_PRIVATE).getBoolean("askedNotify", false)) {
-                getPreferences(MODE_PRIVATE).edit().putBoolean("askedNotify", true).apply();
-                try { requestPermissions(new String[]{ Manifest.permission.POST_NOTIFICATIONS }, 1); } catch (Exception ignored) {}
-            }
-        }
         if (!channelMade) {
             NotificationChannel ch = new NotificationChannel(CHANNEL, "Now playing", NotificationManager.IMPORTANCE_LOW);
             ch.setShowBadge(false);
@@ -528,6 +520,17 @@ public class MainActivity extends Activity {
             if (npDurMs > 0) npPosMs = Math.min(npPosMs, npDurMs);
         }
         updateSession();
+    }
+
+    // Android 13+: ask once, when the app first opens (before any video), whether Vid Search
+    // may show its "now playing" card. Asking later interrupted the video as it started.
+    private void askForNotificationsOnce() {
+        if (isTv || askedNotify || Build.VERSION.SDK_INT < 33) return;
+        askedNotify = true;
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+        if (getPreferences(MODE_PRIVATE).getBoolean("askedNotify", false)) return;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("askedNotify", true).apply();
+        try { requestPermissions(new String[]{ Manifest.permission.POST_NOTIFICATIONS }, 1); } catch (Exception ignored) {}
     }
 
     // Title, episode, position and length from the website (blank if nothing / older site)
