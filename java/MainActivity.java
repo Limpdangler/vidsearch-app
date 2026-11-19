@@ -662,6 +662,8 @@ public class MainActivity extends Activity {
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
         if (fullView != null) {
+            // Tell Vid Search this is on purpose, so it doesn't put you back into fullscreen
+            web.evaluateJavascript("(function(){try{vsLeavingFullscreen();}catch(e){}})()", null);
             exitFullscreen();
             return;
         }
