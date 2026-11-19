@@ -92,8 +92,23 @@
   // so your next tap tries to open an ad. The app already blocks the ad, but just
   // trying to open a new window makes Android drop out of fullscreen. Refusing it here,
   // before it gets that far, keeps you in fullscreen. Nothing in a player needs one.
+  // It hands back a pretend window rather than nothing: some players (VidRift) treat
+  // "nothing" as a sign they've been locked down ("sandboxed") and refuse to play.
+  function pretendWindow() {
+    var w = {
+      closed: false, opener: null, name: '', length: 0,
+      close: function () { w.closed = true; },
+      focus: function () {}, blur: function () {}, postMessage: function () {},
+      moveTo: function () {}, resizeTo: function () {}, stop: function () {},
+      location: { href: 'about:blank', assign: function () {}, replace: function () {}, reload: function () {} },
+      document: { write: function () {}, writeln: function () {}, open: function () {}, close: function () {},
+                  body: null, documentElement: null }
+    };
+    w.window = w; w.self = w; w.top = w; w.parent = w; w.frames = w;
+    return w;
+  }
   try {
-    var noPopup = function open() { return null; };
+    var noPopup = function open() { return pretendWindow(); };
     if (disguise) disguise.set(noPopup, window.open);
     window.open = noPopup;
   } catch (e) {}
