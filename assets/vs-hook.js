@@ -8,6 +8,8 @@
 //   Vid Search -> helper:  { vsHookCmd: 'play' | 'pause' | 'seek' | 'state' | 'fsAck' | 'fsFallback', t, token }
 //   helper -> Vid Search:  { vsHook: 'state', pos, dur, paused, ended, token }
 //                          { vsHook: 'fullscreen', token }
+//                          { vsHook: 'key', key, token }        (TV remote arrows pressed inside the player)
+//                          { vsHook: 'dbltap', secs, token }    (double-tap on the left / right of the video)
 //
 // __TOKEN__ is replaced by the app with a random code each time it starts, so
 // only Vid Search's own messages are obeyed.
@@ -43,6 +45,7 @@
   }
 
   function askVidSearch(el, original, args) {
+    if (Date.now() < tapGuardUntil) return Promise.resolve();   // that was a double-tap to jump
     if (fsWait) { clearTimeout(fsWait.timer); fsWait.resolve(); }
     return new Promise(function (resolve) {
       fsWait = { el: el, original: original, args: args, resolve: resolve,
@@ -232,6 +235,53 @@
       return;
     }
   }
+
+  // ── TV remote: arrows go to Vid Search, not the player ─────
+  // Web players use the up/down arrows for their own volume, so on a TV pressing up/down
+  // after OK on the video changed the volume instead of moving around Vid Search. On a TV
+  // (the app adds "VidSearchTV" to its name there), pass the arrows to Vid Search instead.
+  var ON_TV = /VidSearchTV/.test(navigator.userAgent);
+  var ARROWS = { ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, Up: 1, Down: 1, Left: 1, Right: 1 };
+  if (ON_TV) {
+    window.addEventListener('keydown', function (e) {
+      if (!ARROWS[e.key]) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      var key = e.key.indexOf('Arrow') === 0 ? e.key : 'Arrow' + e.key;
+      try { window.top.postMessage({ vsHook: 'key', key: key, token: TOKEN }, '*'); } catch (err) {}
+    }, true);
+    window.addEventListener('keyup', function (e) {
+      if (ARROWS[e.key]) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+  }
+
+  // ── Double-tap the video's left / right side: back / forward 10 seconds ──
+  // Like YouTube: each extra quick tap on the same side jumps another 10 seconds. The
+  // second tap is kept from the player, so it doesn't also count it as a double-click
+  // (which many players use for fullscreen).
+  var lastTap = { t: 0, side: 0 };
+  var tapGuardUntil = 0;
+  window.addEventListener('touchend', function (e) {
+    if (e.touches && e.touches.length) return;               // still touching with another finger
+    var t = e.changedTouches && e.changedTouches[0];
+    if (!t || !allVideos(document).length) return;           // only where the video is
+    var w = window.innerWidth || document.documentElement.clientWidth || 0;
+    if (!w) return;
+    var side = t.clientX < w / 3 ? -1 : (t.clientX > w * 2 / 3 ? 1 : 0);
+    var now = Date.now();
+    if (side && side === lastTap.side && now - lastTap.t < 350) {
+      lastTap.t = now;
+      tapGuardUntil = now + 600;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      try { window.top.postMessage({ vsHook: 'dbltap', secs: side * 10, token: TOKEN }, '*'); } catch (err) {}
+    } else {
+      lastTap = { t: now, side: side };
+    }
+  }, { capture: true, passive: false });
+  window.addEventListener('dblclick', function (e) {
+    if (Date.now() < tapGuardUntil) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
 
   // ── Obey Vid Search, and pass commands on to boxes inside this one ──
   window.addEventListener('message', function (e) {
