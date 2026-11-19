@@ -180,7 +180,7 @@
           if (m.type === 'attributes') { if (m.target.tagName === 'IFRAME') killFrame(m.target); continue; }
           for (var j = 0; j < m.addedNodes.length; j++) killFramesIn(m.addedNodes[j]);
         }
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+      }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
     } catch (e) {}
     // Script trying to move this box to another website
     try {
@@ -198,6 +198,63 @@
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
     if (a && otherSite(a.href)) e.preventDefault();
   }, true);
+
+  // ── Fake "prove you're not a robot" / QR-code screens ────────
+  // A common TV ad scam: a screen over the video saying "scan the QR code to prove
+  // you're not a robot", with a countdown before you can close it. They're recognised
+  // by their wording and removed as soon as they appear, whether they're drawn over the
+  // player or sent in a box of their own. Real checks (Cloudflare's "Just a moment…",
+  // Google and hCaptcha) are left alone, as players sometimes need to pass those.
+  var BAIT = /not a robot|are you (a )?(robot|human)|prove (that )?you|verify (that )?you('| a)re|you('| a)re (a )?human|(scan|scanning) (the |this )?qr|qr[ -]?code/i;
+  var REAL_CHECK_HOST = /(^|\.)(cloudflare\.com|google\.com|gstatic\.com|recaptcha\.net|hcaptcha\.com)$/i;
+  var sweepTimer = null;
+
+  function realCheckPage() {
+    return REAL_CHECK_HOST.test(location.hostname) || /just a moment|attention required/i.test(document.title || '');
+  }
+  // The outermost "floating" (fixed / absolute) box around the scam text, stopping
+  // before anything that also holds the video (so only the scam goes, never the player)
+  function overlayRoot(el) {
+    var root = null;
+    for (var n = el; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      if (n.querySelector && n.querySelector('video, iframe')) break;
+      try {
+        var pos = getComputedStyle(n).position;
+        if (pos === 'fixed' || pos === 'absolute') root = n;
+      } catch (e) {}
+    }
+    return root;
+  }
+  function sweepBait() {
+    sweepTimer = null;
+    if (!document.body || realCheckPage()) return;
+    var text = document.body.textContent || '';
+    if (!BAIT.test(text)) return;
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var node, removed = false, pageWide = false;
+    while ((node = walker.nextNode())) {
+      if (!BAIT.test(node.data)) continue;
+      var el = node.parentElement;
+      if (!el || el.closest('script, style')) continue;
+      var root = overlayRoot(el);
+      if (root) {
+        try { root.remove(); removed = true; } catch (e) {}
+      } else if (!el.closest('video') ) {
+        pageWide = true;
+      }
+    }
+    // The whole box is the scam screen (no video in it): ask the box around it to remove it
+    if (pageWide && !removed && !allVideos(document).length) {
+      try { document.body.innerHTML = ''; } catch (e) {}
+      try { window.parent.postMessage({ vsHookAd: 'remove', token: TOKEN }, '*'); } catch (e) {}
+    }
+  }
+  function sweepSoon() { if (!sweepTimer) sweepTimer = setTimeout(sweepBait, 150); }
+  try {
+    // (watch the document itself: at this early point the page's <html> may not exist yet)
+    new MutationObserver(sweepSoon).observe(document, { childList: true, subtree: true, characterData: true });
+  } catch (e) {}
+  setInterval(sweepBait, 2000);
 
   // ── Find the main video ─────────────────────────────────────
   // Some players hide their video inside "shadow" sections, so look there too.
@@ -417,6 +474,13 @@
   // ── Obey Vid Search, and pass commands on to boxes inside this one ──
   window.addEventListener('message', function (e) {
     var m = e.data;
+    if (m && typeof m === 'object' && m.vsHookAd === 'remove' && m.token === TOKEN) {
+      var boxes = document.querySelectorAll('iframe, frame');
+      for (var b = 0; b < boxes.length; b++) {
+        if (boxes[b].contentWindow === e.source) { killFrame(boxes[b]); break; }
+      }
+      return;
+    }
     if (typeof m === 'string') {
       if (m.indexOf('vsHookCmd') < 0) return;
       try { m = JSON.parse(m); } catch (err) { return; }
