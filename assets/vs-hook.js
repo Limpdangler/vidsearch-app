@@ -182,6 +182,27 @@
         }
       }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
     } catch (e) {}
+    // Boxes that were already there but hidden or tiny when the video started, then
+    // suddenly grow over the player later on: that's an ad springing up. (The player's
+    // own box is already big at that point, so it's never touched.)
+    try {
+      var bigAtStart = typeof WeakSet === 'function' ? new WeakSet() : null;
+      var isBig = function (f) {
+        var r = f.getBoundingClientRect();
+        var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+        if (r.width * r.height < vw * vh * 0.3) return false;
+        var cs = getComputedStyle(f);
+        return cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.1;
+      };
+      var boxes = document.querySelectorAll('iframe, frame');
+      for (var k = 0; k < boxes.length; k++) if (bigAtStart && isBig(boxes[k])) bigAtStart.add(boxes[k]);
+      if (bigAtStart) setInterval(function () {
+        var list = document.querySelectorAll('iframe, frame');
+        for (var q = 0; q < list.length; q++) {
+          if (!bigAtStart.has(list[q]) && isBig(list[q])) killFrame(list[q]);
+        }
+      }, 700);
+    } catch (e) {}
     // Script trying to move this box to another website
     try {
       if (window.navigation && navigation.addEventListener) {
@@ -208,6 +229,15 @@
   var BAIT = /not a robot|are you (a )?(robot|human)|prove (that )?you|verify (that )?you('| a)re|you('| a)re (a )?human|(scan|scanning) (the |this )?qr|qr[ -]?code/i;
   var REAL_CHECK_HOST = /(^|\.)(cloudflare\.com|google\.com|gstatic\.com|recaptcha\.net|hcaptcha\.com)$/i;
   var sweepTimer = null;
+  // Gambling / "you've won" ad pages (treasure chests, prize wheels). These words can
+  // turn up in real titles, so they only count in a box that's a page of its own with
+  // no video and no other boxes in it — never in the player itself.
+  var PRIZE = /try your luck|free spins|spin (the|to) win|spin the wheel|claim (your )?(prize|reward|bonus|gift)|you('| ha)ve (just )?won|you are (the |a )?(lucky )?winner|open (the|your) (chest|box|gift)/i;
+  function prizePage() {
+    if (!document.body || allVideos(document).length) return false;
+    try { if (document.querySelector('iframe, frame')) return false; } catch (e) {}
+    return PRIZE.test(document.body.innerText || document.body.textContent || '');
+  }
 
   function realCheckPage() {
     return REAL_CHECK_HOST.test(location.hostname) || /just a moment|attention required/i.test(document.title || '');
@@ -228,6 +258,11 @@
   function sweepBait() {
     sweepTimer = null;
     if (!document.body || realCheckPage()) return;
+    if (window.top !== window && prizePage()) {
+      try { document.body.innerHTML = ''; } catch (e) {}
+      try { window.parent.postMessage({ vsHookAd: 'remove', token: TOKEN }, '*'); } catch (e) {}
+      return;
+    }
     var text = document.body.textContent || '';
     if (!BAIT.test(text)) return;
     var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
