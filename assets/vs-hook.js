@@ -6,8 +6,8 @@
 // to Vid Search's fullscreen, so Skip intro and Up next stay on screen.
 //
 //   Vid Search -> helper:  { vsHookCmd: 'play' | 'pause' | 'seek' | 'state' | 'fsAck' | 'fsFallback'
-//                                       | 'start' | 'lock', t, token }
-//   helper -> Vid Search:  { vsHook: 'state', pos, dur, paused, ended, token }
+//                                       | 'start' | 'lock' | 'unmute', t, token }
+//   helper -> Vid Search:  { vsHook: 'state', pos, dur, paused, ended, muted, token }
 //                          { vsHook: 'fullscreen', token }
 //                          { vsHook: 'key', key, token }        (TV remote arrows pressed inside the player)
 //                          { vsHook: 'dbltap', side, secs, token }  (double-tap: left -1 / middle 0 / right 1)
@@ -315,7 +315,8 @@
         pos: v.currentTime || 0,
         dur: videoLength(v),
         paused: !!v.paused,
-        ended: !!v.ended
+        ended: !!v.ended,
+        muted: !!v.muted || v.volume === 0
       }, '*');
     } catch (e) {}
   }
@@ -510,6 +511,9 @@
           hideControlsSoon();
         } else if (m.vsHookCmd === 'pause') {
           v.pause();
+        } else if (m.vsHookCmd === 'unmute') {
+          v.muted = false;                       // the player muted itself to start by itself
+          if (v.volume === 0) v.volume = 1;
         } else if (m.vsHookCmd === 'seek' && isFinite(m.t)) {
           v.currentTime = Math.max(0, m.t);
           hideControlsSoon();
