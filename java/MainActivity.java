@@ -28,6 +28,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.SystemClock;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.util.Rational;
 import android.view.KeyEvent;
 import android.view.View;
@@ -46,6 +49,8 @@ import android.widget.FrameLayout;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import androidx.webkit.JavaScriptReplyProxy;
+import androidx.webkit.WebMessageCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
@@ -313,6 +318,7 @@ public class MainActivity extends Activity {
         });
 
         addPlayerHelper();
+        addTapBridge();
 
         if (savedState == null || web.restoreState(savedState) == null) {
             web.loadUrl(HOME);
@@ -587,6 +593,53 @@ public class MainActivity extends Activity {
     // before their own code runs, so Vid Search can play / pause / jump the video in
     // any source. Needs a reasonably recent Android System WebView; if it's not
     // supported, nothing is added and Vid Search simply doesn't offer the feature.
+    // TV remote → the player's own buttons. Players ignore clicks made up by a script, so
+    // when you press OK on one of the player's buttons, Vid Search asks the app for a real
+    // tap at that spot, exactly as if you'd touched the screen there. Only the Vid Search
+    // page itself can ask (not the players or ads inside it), and only inside the player.
+    private void addTapBridge() {
+        try {
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return;
+            WebViewCompat.addWebMessageListener(web, "vsApp",
+                Collections.singleton("https://" + SITE_HOST),
+                new WebViewCompat.WebMessageListener() {
+                    @Override
+                    public void onPostMessage(WebView view, WebMessageCompat message, Uri sourceOrigin,
+                                              boolean isMainFrame, JavaScriptReplyProxy replyProxy) {
+                        if (!isMainFrame || message == null) return;
+                        String d = message.getData();
+                        if (d == null || !d.startsWith("tap:")) return;
+                        String[] p = d.substring(4).split(",");
+                        if (p.length != 2) return;
+                        try {
+                            float x = Float.parseFloat(p[0]), y = Float.parseFloat(p[1]);
+                            if (x < 0 || y < 0 || x > web.getWidth() || y > web.getHeight()) return;
+                            tapAt(x, y);
+                        } catch (NumberFormatException ignored) { }
+                    }
+                });
+        } catch (Exception ignored) {
+            // Not available on this device: the helper falls back to made-up clicks
+        }
+    }
+
+    private void tapAt(final float x, final float y) {
+        final long down = SystemClock.uptimeMillis();
+        MotionEvent d = MotionEvent.obtain(down, down, MotionEvent.ACTION_DOWN, x, y, 0);
+        d.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        web.dispatchTouchEvent(d);
+        d.recycle();
+        web.postDelayed(new Runnable() {
+            @Override public void run() {
+                long now = SystemClock.uptimeMillis();
+                MotionEvent u = MotionEvent.obtain(down, now, MotionEvent.ACTION_UP, x, y, 0);
+                u.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+                web.dispatchTouchEvent(u);
+                u.recycle();
+            }
+        }, 60);
+    }
+
     private void addPlayerHelper() {
         try {
             if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return;
