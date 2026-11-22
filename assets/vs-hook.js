@@ -492,6 +492,7 @@
   var lastTap = { t: 0, side: 0 };
   var tapGuardUntil = 0;
   window.addEventListener('touchend', function (e) {
+    if (menuOn) return;                                      // pressing the player's buttons
     if (e.touches && e.touches.length) return;               // still touching with another finger
     var t = e.changedTouches && e.changedTouches[0];
     if (!t || !allVideos(document).length) return;           // only where the video is
@@ -511,16 +512,16 @@
     }
   }, { capture: true, passive: false });
   window.addEventListener('dblclick', function (e) {
-    if (Date.now() < tapGuardUntil) { e.preventDefault(); e.stopImmediatePropagation(); }
+    if (Date.now() < tapGuardUntil && !menuOn) { e.preventDefault(); e.stopImmediatePropagation(); }
   }, true);
 
   // ── Obey Vid Search, and pass commands on to boxes inside this one ──
   // ── TV remote: use the player's own buttons (subtitles, settings, speed, quality) ──
   // Vid Search asks for this (▼ on the remote in fullscreen). The box with the video shows
-  // the player's controls, puts a yellow frame round one of its buttons, and from then on
+  // the player's controls, puts a white frame round one of its buttons, and from then on
   // the arrows move the frame, OK presses the button, and Back finishes. Works on any
   // player, because it just looks for things on screen that can be pressed.
-  var menuOn = false, menuCur = null, menuFrame = null, menuWake = null;
+  var menuOn = false, menuCur = null, menuFrame = null, menuWake = null, menuReal = false, menuOpener = null;
   var CLICKY = 'button, [role="button"], [role^="menuitem"], [role="option"], [role="radio"], ' +
       '[role="checkbox"], [role="switch"], [role="tab"], a[href], input, select, li, label, ' +
       '[onclick], [tabindex]:not([tabindex="-1"])';
@@ -553,14 +554,23 @@
   }
   function pressables() {
     var found = findAll(document, CLICKY, []);
-    // Plus things that only show they're pressable with a pointing-hand mouse pointer
-    var loose = findAll(document, 'div, span, i, svg, img, p', []);
-    for (var i = 0; i < loose.length && i < 3000; i++) {
+    // Plus anything that shows it's pressable with a pointing-hand mouse pointer, whatever
+    // it's made of (some players build their buttons out of made-up tags). Parts of a
+    // button (its icon, its label) don't count separately: only the button itself does.
+    var loose = findAll(document, 'body *', []);
+    for (var i = 0; i < loose.length && i < 4000; i++) {
       var el = loose[i];
       try {
+        if (el.ownerSVGElement) continue;                                  // a piece of an icon
+        if (/^(script|style|video|audio|source|track|iframe|html|body)$/i.test(el.tagName)) continue;
         if (getComputedStyle(el).cursor !== 'pointer') continue;
-        var up = el.parentElement;
-        if (up && getComputedStyle(up).cursor === 'pointer') continue;   // its parent counts instead
+        var up = el.parentElement || (el.parentNode && el.parentNode.host);
+        if (up && up !== document.body && getComputedStyle(up).cursor === 'pointer') {
+          // Inside something else pressable: an icon or the only thing in it is just part of
+          // that button; but one of several (the options in a menu, the buttons on a bar)
+          // counts on its own
+          if (/^(svg|img|i)$/i.test(el.tagName) || up.children.length < 2) continue;
+        }
         found.push(el);
       } catch (e) {}
     }
@@ -599,7 +609,7 @@
     if (!menuFrame) {
       menuFrame = document.createElement('div');
       menuFrame.setAttribute('style', 'position:fixed;pointer-events:none;z-index:2147483647;' +
-        'border:3px solid #ffd400;border-radius:6px;box-shadow:0 0 0 2px rgba(0,0,0,.7),0 0 12px #ffd400;' +
+        'border:3px solid #fff;border-radius:6px;box-shadow:0 0 0 2px rgba(0,0,0,.7),0 0 10px rgba(255,255,255,.6);' +
         'transition:all .12s;box-sizing:border-box');
     }
     if (!menuFrame.isConnected) (document.body || document.documentElement).appendChild(menuFrame);
@@ -642,29 +652,44 @@
       return;
     }
     var a = menuCur.getBoundingClientRect(), ac = centre(a);
-    var best = null, bestScore = Infinity;
+    // The next one along the same line first (◀ ▶ = same row, ▲ ▼ = same column), nearest
+    // first, so you go through them one at a time; only if there's none, the nearest anywhere
+    var best = null, bestScore = Infinity, bestLine = false;
     for (var i = 0; i < list.length; i++) {
       var el = list[i];
-      if (el === menuCur) continue;
+      if (el === menuCur || el.contains(menuCur) || menuCur.contains(el)) continue;
       var b = el.getBoundingClientRect(), bc = centre(b);
-      var along, across;
+      var along, across, line;
       if (dir === 'left' || dir === 'right') {
         along = dir === 'right' ? bc.x - ac.x : ac.x - bc.x;
-        across = Math.max(0, b.top - a.bottom, a.top - b.bottom);
+        across = Math.abs(bc.y - ac.y);
+        line = bc.y > a.top - 2 && bc.y < a.bottom + 2 || ac.y > b.top - 2 && ac.y < b.bottom + 2;
       } else {
         along = dir === 'down' ? bc.y - ac.y : ac.y - bc.y;
-        across = Math.max(0, b.left - a.right, a.left - b.right);
+        across = Math.abs(bc.x - ac.x);
+        line = bc.x > a.left - 2 && bc.x < a.right + 2 || ac.x > b.left - 2 && ac.x < b.right + 2;
       }
       if (along <= 2) continue;
-      var score = along + across * 3;
-      if (score < bestScore) { bestScore = score; best = el; }
+      var score = line ? along : along + across * 3;
+      if ((line && !bestLine) || (line === bestLine && score < bestScore)) { bestScore = score; best = el; bestLine = line; }
     }
     if (best) { menuCur = best; drawFrame(); }
   }
   function menuPress() {
     if (!menuCur || !menuCur.isConnected) { menuStep('down'); return; }
     var before = pressables(), pressed = menuCur, pr = pressed.getBoundingClientRect();
-    pressIt(pressed);
+    // The player's own fullscreen button: we're already fullscreen, so it means "leave"
+    if (/full.?screen|exit.?full|expand|maximi/.test(labelOf(pressed))) {
+      try { window.top.postMessage({ vsHook: 'menu', state: 'fullscreen', token: TOKEN }, '*'); } catch (e) {}
+      return;
+    }
+    if (menuReal) {
+      // A real tap, as if you'd touched the screen there (the app does it): Vid Search
+      // works out where on the screen that is
+      try { window.parent.postMessage({ vsHook: 'tapUp', x: pr.left + pr.width / 2, y: pr.top + pr.height / 2, token: TOKEN }, '*'); } catch (e) {}
+    } else {
+      pressIt(pressed);
+    }
     setTimeout(function () {
       if (!menuOn) return;
       wakeControls();
@@ -672,6 +697,7 @@
       // A menu just opened: jump into it (to the option that's ticked, if there is one)
       var fresh = now.filter(function (el) { return before.indexOf(el) < 0; });
       if (fresh.length) {
+        menuOpener = pressed;                // to come back to when this menu closes
         var ticked = fresh.filter(function (el) {
           return el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-selected') === 'true' ||
                  /\b(active|selected|checked|current)\b/.test(typeof el.className === 'string' ? el.className : '');
@@ -682,13 +708,16 @@
           return Math.abs(a.top - b.top) > 4 ? a.top - b.top : a.left - b.left;
         })[0];
       } else if (now.indexOf(pressed) < 0) {
-        menuCur = now.length ? nearestTo(now, pr) : null;
+        // You picked something and the menu closed: back to the button that opened it
+        menuCur = menuOpener && now.indexOf(menuOpener) >= 0 ? menuOpener : (now.length ? nearestTo(now, pr) : null);
+        menuOpener = null;
       }
       drawFrame();
-    }, 350);
+    }, menuReal ? 550 : 350);
   }
-  function menuStart() {
+  function menuStart(real) {
     menuOn = true;
+    menuReal = !!real;
     if (!allVideos(document).length) return;      // not the box with the video in it
     wakeControls();
     clearInterval(menuWake);
@@ -706,6 +735,7 @@
     var was = menuOn && allVideos(document).length;
     menuOn = false;
     menuCur = null;
+    menuOpener = null;
     clearInterval(menuWake);
     drawFrame();
     if (was) hideControlsSoon();
@@ -713,6 +743,19 @@
 
   window.addEventListener('message', function (e) {
     var m = e.data;
+    if (m && typeof m === 'object' && m.vsHook === 'tapUp' && m.token === TOKEN) {
+      var fr = document.querySelectorAll('iframe, frame');
+      for (var q = 0; q < fr.length; q++) {
+        if (fr[q].contentWindow !== e.source) continue;
+        var rr = fr[q].getBoundingClientRect();
+        try {
+          window.parent.postMessage({ vsHook: 'tapUp', token: TOKEN,
+            x: rr.left + fr[q].clientLeft + m.x, y: rr.top + fr[q].clientTop + m.y }, '*');
+        } catch (err) {}
+        break;
+      }
+      return;
+    }
     if (m && typeof m === 'object' && m.vsHookAd === 'remove' && m.token === TOKEN) {
       var boxes = document.querySelectorAll('iframe, frame');
       for (var b = 0; b < boxes.length; b++) {
@@ -740,7 +783,7 @@
     if (m.vsHookCmd === 'start') pressStart();
     if (m.vsHookCmd === 'lock') lockDown();
     if (/^menu/.test(m.vsHookCmd)) {
-      if (m.vsHookCmd === 'menuStart') menuStart();
+      if (m.vsHookCmd === 'menuStart') menuStart(m.realTap);
       else if (m.vsHookCmd === 'menuEnd') menuEnd();
       else if (menuOn && allVideos(document).length) {
         if (m.vsHookCmd === 'menuMove') { wakeControls(); menuStep(m.dir); }
