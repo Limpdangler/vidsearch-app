@@ -396,6 +396,7 @@
     } catch (e) {}
   }
   function hideControls() {
+    if (menuOn) return;                 // you're using the player's buttons
     var v = mainVideo();
     if (!v || v.paused) return;
     var r = v.getBoundingClientRect();
@@ -465,6 +466,12 @@
   var ARROWS = { ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, Up: 1, Down: 1, Left: 1, Right: 1 };
   if (ON_TV) {
     window.addEventListener('keydown', function (e) {
+      if (menuOn && (e.key === 'Enter' || e.key === ' ' || e.key === 'Select')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        try { window.top.postMessage({ vsHook: 'key', key: 'Enter', token: TOKEN }, '*'); } catch (err) {}
+        return;
+      }
       if (!ARROWS[e.key]) return;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -508,6 +515,202 @@
   }, true);
 
   // ── Obey Vid Search, and pass commands on to boxes inside this one ──
+  // ── TV remote: use the player's own buttons (subtitles, settings, speed, quality) ──
+  // Vid Search asks for this (▼ on the remote in fullscreen). The box with the video shows
+  // the player's controls, puts a yellow frame round one of its buttons, and from then on
+  // the arrows move the frame, OK presses the button, and Back finishes. Works on any
+  // player, because it just looks for things on screen that can be pressed.
+  var menuOn = false, menuCur = null, menuFrame = null, menuWake = null;
+  var CLICKY = 'button, [role="button"], [role^="menuitem"], [role="option"], [role="radio"], ' +
+      '[role="checkbox"], [role="switch"], [role="tab"], a[href], input, select, li, label, ' +
+      '[onclick], [tabindex]:not([tabindex="-1"])';
+
+  function findAll(root, sel, out) {
+    try {
+      var list = root.querySelectorAll(sel);
+      for (var i = 0; i < list.length; i++) out.push(list[i]);
+      var every = root.querySelectorAll('*');
+      for (var j = 0; j < every.length; j++) if (every[j].shadowRoot) findAll(every[j].shadowRoot, sel, out);
+    } catch (e) {}
+    return out;
+  }
+  function onScreen(el) {
+    if (!el || !el.isConnected || el === menuFrame) return null;
+    var r = el.getBoundingClientRect();
+    var W = window.innerWidth, H = window.innerHeight;
+    if (r.width < 6 || r.height < 6 || r.right <= 0 || r.bottom <= 0 || r.left >= W || r.top >= H) return null;
+    if (r.width * r.height > W * H * 0.25) return null;        // the whole picture, not a button
+    var cs = getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none' || cs.pointerEvents === 'none') return null;
+    // Actually on top (not hidden behind something else)
+    var x = Math.min(W - 1, Math.max(0, r.left + r.width / 2));
+    var y = Math.min(H - 1, Math.max(0, r.top + r.height / 2));
+    var root = el.getRootNode ? el.getRootNode() : document;
+    var hit = null;
+    try { hit = (root.elementFromPoint ? root : document).elementFromPoint(x, y); } catch (e) {}
+    if (!hit || !(hit === el || el.contains(hit) || hit.contains(el))) return null;
+    return r;
+  }
+  function pressables() {
+    var found = findAll(document, CLICKY, []);
+    // Plus things that only show they're pressable with a pointing-hand mouse pointer
+    var loose = findAll(document, 'div, span, i, svg, img, p', []);
+    for (var i = 0; i < loose.length && i < 3000; i++) {
+      var el = loose[i];
+      try {
+        if (getComputedStyle(el).cursor !== 'pointer') continue;
+        var up = el.parentElement;
+        if (up && getComputedStyle(up).cursor === 'pointer') continue;   // its parent counts instead
+        found.push(el);
+      } catch (e) {}
+    }
+    var out = [];
+    for (var k = 0; k < found.length; k++) {
+      if (out.indexOf(found[k]) < 0 && onScreen(found[k])) out.push(found[k]);
+    }
+    // When one is inside another (a menu row with a button in it), keep the inner one
+    return out.filter(function (a) {
+      for (var n = 0; n < out.length; n++) if (out[n] !== a && a.contains(out[n])) return false;
+      return true;
+    });
+  }
+  function labelOf(el) {
+    return ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' +
+            (typeof el.className === 'string' ? el.className : '') + ' ' + (el.id || '') + ' ' +
+            ((el.textContent || '').length < 30 ? el.textContent : '')).toLowerCase();
+  }
+  function wakeControls() {
+    var v = mainVideo();
+    if (!v) return;
+    var r = v.getBoundingClientRect();
+    var x = r.left + r.width / 2, y = r.top + r.height * 0.6;
+    fire(v, 'pointermove', true, x, y);
+    fire(v, 'mousemove', true, x, y);
+    fire(v, 'pointerover', true, x, y);
+    fire(v, 'mouseover', true, x, y);
+    if (menuCur && menuCur.isConnected) {
+      var c = menuCur.getBoundingClientRect();
+      fire(menuCur, 'pointermove', true, c.left + c.width / 2, c.top + c.height / 2);
+      fire(menuCur, 'mousemove', true, c.left + c.width / 2, c.top + c.height / 2);
+    }
+  }
+  function drawFrame() {
+    if (!menuOn || !menuCur) { if (menuFrame) menuFrame.style.display = 'none'; return; }
+    if (!menuFrame) {
+      menuFrame = document.createElement('div');
+      menuFrame.setAttribute('style', 'position:fixed;pointer-events:none;z-index:2147483647;' +
+        'border:3px solid #ffd400;border-radius:6px;box-shadow:0 0 0 2px rgba(0,0,0,.7),0 0 12px #ffd400;' +
+        'transition:all .12s;box-sizing:border-box');
+    }
+    if (!menuFrame.isConnected) (document.body || document.documentElement).appendChild(menuFrame);
+    var r = menuCur.getBoundingClientRect();
+    menuFrame.style.display = 'block';
+    menuFrame.style.left = (r.left - 4) + 'px';
+    menuFrame.style.top = (r.top - 4) + 'px';
+    menuFrame.style.width = (r.width + 8) + 'px';
+    menuFrame.style.height = (r.height + 8) + 'px';
+  }
+  function centre(r) { return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }
+  function nearestTo(list, r) {
+    var c = centre(r), best = null, bd = Infinity;
+    for (var i = 0; i < list.length; i++) {
+      var o = centre(list[i].getBoundingClientRect());
+      var d = Math.hypot(o.x - c.x, o.y - c.y);
+      if (d < bd) { bd = d; best = list[i]; }
+    }
+    return best;
+  }
+  function firstPick(list) {
+    var tests = [/caption|subtitle|\bcc\b|\bsubs?\b/, /setting|gear|quality|speed|cog/];
+    for (var t = 0; t < tests.length; t++) {
+      for (var i = 0; i < list.length; i++) if (tests[t].test(labelOf(list[i]))) return list[i];
+    }
+    // Otherwise the bottom-right one (where controls usually sit)
+    var best = null, bs = -Infinity;
+    for (var j = 0; j < list.length; j++) {
+      var r = list[j].getBoundingClientRect(), sc = r.bottom * 2 + r.right;
+      if (sc > bs) { bs = sc; best = list[j]; }
+    }
+    return best;
+  }
+  function menuStep(dir) {
+    var list = pressables();
+    if (!list.length) return;
+    if (!menuCur || list.indexOf(menuCur) < 0) {
+      menuCur = menuCur && menuCur.isConnected ? nearestTo(list, menuCur.getBoundingClientRect()) : firstPick(list);
+      drawFrame();
+      return;
+    }
+    var a = menuCur.getBoundingClientRect(), ac = centre(a);
+    var best = null, bestScore = Infinity;
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      if (el === menuCur) continue;
+      var b = el.getBoundingClientRect(), bc = centre(b);
+      var along, across;
+      if (dir === 'left' || dir === 'right') {
+        along = dir === 'right' ? bc.x - ac.x : ac.x - bc.x;
+        across = Math.max(0, b.top - a.bottom, a.top - b.bottom);
+      } else {
+        along = dir === 'down' ? bc.y - ac.y : ac.y - bc.y;
+        across = Math.max(0, b.left - a.right, a.left - b.right);
+      }
+      if (along <= 2) continue;
+      var score = along + across * 3;
+      if (score < bestScore) { bestScore = score; best = el; }
+    }
+    if (best) { menuCur = best; drawFrame(); }
+  }
+  function menuPress() {
+    if (!menuCur || !menuCur.isConnected) { menuStep('down'); return; }
+    var before = pressables(), pressed = menuCur, pr = pressed.getBoundingClientRect();
+    pressIt(pressed);
+    setTimeout(function () {
+      if (!menuOn) return;
+      wakeControls();
+      var now = pressables();
+      // A menu just opened: jump into it (to the option that's ticked, if there is one)
+      var fresh = now.filter(function (el) { return before.indexOf(el) < 0; });
+      if (fresh.length) {
+        var ticked = fresh.filter(function (el) {
+          return el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-selected') === 'true' ||
+                 /\b(active|selected|checked|current)\b/.test(typeof el.className === 'string' ? el.className : '');
+        });
+        // otherwise the first one in the menu (top, then left)
+        menuCur = ticked[0] || fresh.slice().sort(function (x, y) {
+          var a = x.getBoundingClientRect(), b = y.getBoundingClientRect();
+          return Math.abs(a.top - b.top) > 4 ? a.top - b.top : a.left - b.left;
+        })[0];
+      } else if (now.indexOf(pressed) < 0) {
+        menuCur = now.length ? nearestTo(now, pr) : null;
+      }
+      drawFrame();
+    }, 350);
+  }
+  function menuStart() {
+    menuOn = true;
+    if (!allVideos(document).length) return;      // not the box with the video in it
+    wakeControls();
+    clearInterval(menuWake);
+    menuWake = setInterval(function () { wakeControls(); drawFrame(); }, 1200);
+    setTimeout(function () {
+      if (!menuOn) return;
+      wakeControls();
+      var list = pressables();
+      menuCur = list.length ? firstPick(list) : null;
+      drawFrame();
+      try { window.top.postMessage({ vsHook: 'menu', state: list.length ? 'on' : 'none', token: TOKEN }, '*'); } catch (e) {}
+    }, 300);
+  }
+  function menuEnd() {
+    var was = menuOn && allVideos(document).length;
+    menuOn = false;
+    menuCur = null;
+    clearInterval(menuWake);
+    drawFrame();
+    if (was) hideControlsSoon();
+  }
+
   window.addEventListener('message', function (e) {
     var m = e.data;
     if (m && typeof m === 'object' && m.vsHookAd === 'remove' && m.token === TOKEN) {
@@ -536,6 +739,18 @@
 
     if (m.vsHookCmd === 'start') pressStart();
     if (m.vsHookCmd === 'lock') lockDown();
+    if (/^menu/.test(m.vsHookCmd)) {
+      if (m.vsHookCmd === 'menuStart') menuStart();
+      else if (m.vsHookCmd === 'menuEnd') menuEnd();
+      else if (menuOn && allVideos(document).length) {
+        if (m.vsHookCmd === 'menuMove') { wakeControls(); menuStep(m.dir); }
+        if (m.vsHookCmd === 'menuPress') { wakeControls(); menuPress(); }
+      }
+      for (var f = 0; f < window.frames.length; f++) {
+        try { window.frames[f].postMessage(m, '*'); } catch (err) {}
+      }
+      return;
+    }
 
     var v = (fsCmd || m.vsHookCmd === 'start' || m.vsHookCmd === 'lock') ? null : mainVideo();
     if (v) {
