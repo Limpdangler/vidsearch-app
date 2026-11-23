@@ -580,19 +580,21 @@ public class MainActivity extends Activity {
     public void onPictureInPictureModeChanged(boolean inPip, Configuration newConfig) {
         super.onPictureInPictureModeChanged(inPip, newConfig);
         if (web == null) return;
+        web.evaluateJavascript("(function(){try{vsPipMode(" + inPip + ");}catch(e){}})()", null);
         if (inPip) {
             pipJustEnded = false;
             if (fullView == null) web.evaluateJavascript(PIP_ON_JS, null);
         } else {
             pipJustEnded = true;
             web.evaluateJavascript(PIP_OFF_JS, null);
+            // Growing back from the little window: make sure the page is laid out for the
+            // full screen again (otherwise it can stay "zoomed in" on its top-left corner)
+            relayout();
+            web.postDelayed(this::relayout, 300);
+            web.postDelayed(this::relayout, 1000);
         }
     }
 
-    // Player helper (assets/vs-hook.js): added to every page and every box inside it
-    // before their own code runs, so Vid Search can play / pause / jump the video in
-    // any source. Needs a reasonably recent Android System WebView; if it's not
-    // supported, nothing is added and Vid Search simply doesn't offer the feature.
     // TV remote → the player's own buttons. Players ignore clicks made up by a script, so
     // when you press OK on one of the player's buttons, Vid Search asks the app for a real
     // tap at that spot, exactly as if you'd touched the screen there. Only the Vid Search
@@ -640,6 +642,10 @@ public class MainActivity extends Activity {
         }, 60);
     }
 
+    // Player helper (assets/vs-hook.js): added to every page and every box inside it
+    // before their own code runs, so Vid Search can play / pause / jump the video in
+    // any source. Needs a reasonably recent Android System WebView; if it's not
+    // supported, nothing is added and Vid Search simply doesn't offer the feature.
     private void addPlayerHelper() {
         try {
             if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return;
@@ -687,11 +693,21 @@ public class MainActivity extends Activity {
         lastToast = now;
     }
 
+    private void relayout() {
+        if (web == null) return;
+        web.requestLayout();
+        web.invalidate();
+        if (fullView != null) { fullView.requestLayout(); fullView.invalidate(); }
+        web.evaluateJavascript("(function(){try{window.dispatchEvent(new Event('resize'));}catch(e){}})()", null);
+    }
+
     private void exitFullscreen() {
         if (fullView == null) return;
         root.removeView(fullView);
         fullView = null;
         web.setVisibility(View.VISIBLE);
+        // Fullscreen ended while in the little window: keep the window showing just the video
+        if (Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode()) web.evaluateJavascript(PIP_ON_JS, null);
         immersive(false);
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         WebChromeClient.CustomViewCallback cb = fullCallback;
