@@ -741,6 +741,27 @@
     if (was) hideControlsSoon();
   }
 
+  // ── Floating window (picture-in-picture): just the video ──
+  // While the app's floating window is open, the player's own buttons, bars and big play
+  // button are hidden, so they can't get stuck on top of the picture. Anything holding
+  // buttons, sliders or icons goes; the video (and whatever it sits in) and plain text —
+  // like subtitles drawn by the player — stay.
+  // (Separate rules, so an older Android that doesn't understand the first still does the rest.)
+  var PIP_CSS =
+    ':not(:has(video,iframe,frame)):has(button,[role="button"],[role="slider"],input,progress,svg){visibility:hidden!important}' +
+    'button,[role="button"],[role="slider"],input,progress,svg{visibility:hidden!important}' +
+    'video::-webkit-media-controls{display:none!important}';
+  function pipLook(on) {
+    var st = document.getElementById('vs-hook-pip');
+    if (!on) { if (st) st.remove(); return; }
+    if (!st) {
+      st = document.createElement('style');
+      st.id = 'vs-hook-pip';
+      st.textContent = PIP_CSS;
+    }
+    if (!st.isConnected) (document.head || document.documentElement).appendChild(st);
+  }
+
   window.addEventListener('message', function (e) {
     var m = e.data;
     if (m && typeof m === 'object' && m.vsHook === 'tapUp' && m.token === TOKEN) {
@@ -782,6 +803,13 @@
 
     if (m.vsHookCmd === 'start') pressStart();
     if (m.vsHookCmd === 'lock') lockDown();
+    if (m.vsHookCmd === 'pip') {
+      pipLook(!!m.on);
+      for (var g = 0; g < window.frames.length; g++) {
+        try { window.frames[g].postMessage(m, '*'); } catch (err) {}
+      }
+      return;
+    }
     if (/^menu/.test(m.vsHookCmd)) {
       if (m.vsHookCmd === 'menuStart') menuStart(m.realTap);
       else if (m.vsHookCmd === 'menuEnd') menuEnd();
