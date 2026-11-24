@@ -50,13 +50,19 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import androidx.webkit.JavaScriptReplyProxy;
+import androidx.webkit.ScriptHandler;
 import androidx.webkit.WebMessageCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileInputStream;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
@@ -66,6 +72,8 @@ import java.util.List;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Vid Search app.
@@ -646,19 +654,120 @@ public class MainActivity extends Activity {
     // before their own code runs, so Vid Search can play / pause / jump the video in
     // any source. Needs a reasonably recent Android System WebView; if it's not
     // supported, nothing is added and Vid Search simply doesn't offer the feature.
+    //
+    // The helper's newest copy lives on the website (vs-hook.js, next to index.html), so
+    // fixes to it reach the app without reinstalling. When the app opens it uses the
+    // newest copy it already has (built in, or saved from the website last time), then
+    // quietly checks the website; if there's a newer one it's saved and used for every
+    // player opened from then on. "Newer" = a higher "vs-hook version" number inside it.
+    // The same check fetches extra ad sites to block (ad-hosts.txt on the website).
+    private static final String HOOK_URL = HOME + "vs-hook.js";
+    private static final String ADS_URL  = HOME + "ad-hosts.txt";
+    private static final Pattern HOOK_VERSION = Pattern.compile("vs-hook version: (\\d+)");
+    private String hookToken;
+    private String hookScript;           // the copy in use (still with __TOKEN__ in it)
+    private ScriptHandler hookHandle;
+    private static volatile Set<String> extraAds = Collections.emptySet();
+
     private void addPlayerHelper() {
         try {
             if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return;
-            String script = readAsset("vs-hook.js");
-            if (script == null) return;
             byte[] random = new byte[16];
             new SecureRandom().nextBytes(random);
             StringBuilder token = new StringBuilder();
             for (byte b : random) token.append(String.format(Locale.ROOT, "%02x", b));
-            script = script.replace("__TOKEN__", token.toString());
-            WebViewCompat.addDocumentStartJavaScript(web, script, Collections.singleton("*"));
+            hookToken = token.toString();
+            String built = readAsset("vs-hook.js");
+            String saved = readSaved("vs-hook-site.js");
+            String script = hookVersion(saved) > hookVersion(built) ? saved : built;
+            if (script == null) return;
+            installHook(script);
         } catch (Exception ignored) {
             // Not available on this device — the website falls back to its normal behaviour
+        }
+        checkSiteForUpdates();
+    }
+
+    private void installHook(String script) {
+        try {
+            if (hookHandle != null) hookHandle.remove();
+            hookHandle = WebViewCompat.addDocumentStartJavaScript(web,
+                    script.replace("__TOKEN__", hookToken), Collections.singleton("*"));
+            hookScript = script;
+        } catch (Exception ignored) { }
+    }
+
+    // A real helper file: the right size, with its version number and the token slot in it
+    private static long hookVersion(String s) {
+        if (s == null || s.length() < 2000 || s.length() > 800000 || !s.contains("__TOKEN__")) return -1;
+        Matcher m = HOOK_VERSION.matcher(s);
+        if (!m.find()) return -1;
+        try { return Long.parseLong(m.group(1)); } catch (NumberFormatException e) { return -1; }
+    }
+
+    private void checkSiteForUpdates() {
+        new Thread(() -> {
+            String fresh = download(HOOK_URL + "?t=" + System.currentTimeMillis());
+            if (hookToken != null && hookVersion(fresh) > hookVersion(hookScript)) {
+                save("vs-hook-site.js", fresh);
+                runOnUiThread(() -> installHook(fresh));
+            }
+            String ads = download(ADS_URL + "?t=" + System.currentTimeMillis());
+            if (ads != null) {
+                Set<String> set = new HashSet<>();
+                for (String line : ads.split("\\r?\\n")) {
+                    String h = line.trim().toLowerCase(Locale.ROOT);
+                    if (h.isEmpty() || h.startsWith("#") || h.contains(" ") || !h.contains(".")) continue;
+                    set.add(h);
+                }
+                extraAds = set;
+            }
+        }).start();
+    }
+
+    // Fetches a file from Vid Search's own website (null if it can't)
+    private static String download(String address) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(address).openConnection();
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(8000);
+            c.setUseCaches(false);
+            if (c.getResponseCode() != 200) return null;
+            try (InputStream in = c.getInputStream()) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                    if (out.size() > 800000) return null;
+                }
+                return new String(out.toByteArray(), StandardCharsets.UTF_8);
+            }
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    private void save(String name, String text) {
+        try (FileOutputStream out = new FileOutputStream(new File(getFilesDir(), name))) {
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) { }
+    }
+
+    private String readSaved(String name) {
+        File f = new File(getFilesDir(), name);
+        if (!f.exists()) return null;
+        try (InputStream in = new FileInputStream(f)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -679,7 +788,7 @@ public class MainActivity extends Activity {
         if (host == null) return false;
         host = host.toLowerCase(Locale.ROOT);
         while (true) {
-            if (AD_HOSTS.contains(host)) return true;
+            if (AD_HOSTS.contains(host) || extraAds.contains(host)) return true;
             int dot = host.indexOf('.');
             if (dot < 0) return false;
             host = host.substring(dot + 1);
