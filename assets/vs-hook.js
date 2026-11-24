@@ -1,4 +1,7 @@
 // Vid Search player helper.
+// vs-hook version: 2026112402
+//   (The app uses whichever copy has the highest version: the one built into the app, or
+//   the one on the website. Raise this number every time the file changes.)
 // The app adds this to every page and every box (iframe) inside it, before the
 // page's own code runs. Inside the video player's boxes it finds the main video
 // and lets Vid Search control it with standard video commands — it never touches
@@ -552,28 +555,66 @@
     if (!hit || !(hit === el || el.contains(hit) || hit.contains(el))) return null;
     return r;
   }
-  function pressables() {
+  // How see-through something really is (its own fading times every box it sits in)
+  function seenAmount(el, memo) {
+    var o = 1;
+    for (var n = el; n && n.nodeType === 1; n = n.parentElement || (n.parentNode && n.parentNode.host)) {
+      if (memo && memo.has(n)) { o *= memo.get(n); break; }
+      var cs = getComputedStyle(n);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return 0;
+      o *= Number(cs.opacity);
+      if (o < 0.05) return 0;
+    }
+    if (memo) memo.set(el, o);
+    return o;
+  }
+  // Everything showing right now (to spot what a press has just opened)
+  function showingNow() {
+    var all = findAll(document, 'body *', []), out = new Set(), memo = new Map();
+    for (var i = 0; i < all.length && i < 6000; i++) {
+      var r = all[i].getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && seenAmount(all[i], memo) > 0.05) out.add(all[i]);
+    }
+    return out;
+  }
+  // Something with words of its own in it (an option in a menu: "English", "1080p", "1.5x")
+  function ownWords(el) {
+    for (var c = el.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3 && /[a-z0-9]/i.test(c.textContent) && c.textContent.trim().length <= 40) return true;
+    }
+    return false;
+  }
+  var menuShown = null;     // what was showing before the last press, to spot new menus
+  var menuExtra = [];       // menu options found by their words
+
+  function rawPressables() {
     var found = findAll(document, CLICKY, []);
-    // Plus anything that shows it's pressable with a pointing-hand mouse pointer, whatever
-    // it's made of (some players build their buttons out of made-up tags). Parts of a
-    // button (its icon, its label) don't count separately: only the button itself does.
     var loose = findAll(document, 'body *', []);
-    for (var i = 0; i < loose.length && i < 4000; i++) {
+    for (var i = 0; i < loose.length && i < 6000; i++) {
       var el = loose[i];
       try {
         if (el.ownerSVGElement) continue;                                  // a piece of an icon
         if (/^(script|style|video|audio|source|track|iframe|html|body)$/i.test(el.tagName)) continue;
+        // An icon (picture) button: the small box round the icon. Many players' buttons are
+        // just that, with nothing else to say they can be pressed.
+        if (/^(svg|img|i)$/i.test(el.tagName)) {
+          var box = el;
+          for (var up1 = el.parentElement; up1 && up1 !== document.body; up1 = up1.parentElement) {
+            var ur = up1.getBoundingClientRect();
+            if (ur.width > 90 || ur.height > 90) break;
+            box = up1;
+          }
+          found.push(box);
+          continue;
+        }
+        // Anything with a pointing-hand mouse pointer (parts of one button don't count apart)
         if (getComputedStyle(el).cursor !== 'pointer') continue;
         var up = el.parentElement || (el.parentNode && el.parentNode.host);
-        if (up && up !== document.body && getComputedStyle(up).cursor === 'pointer') {
-          // Inside something else pressable: an icon or the only thing in it is just part of
-          // that button; but one of several (the options in a menu, the buttons on a bar)
-          // counts on its own
-          if (/^(svg|img|i)$/i.test(el.tagName) || up.children.length < 2) continue;
-        }
+        if (up && up !== document.body && getComputedStyle(up).cursor === 'pointer' && up.children.length < 2) continue;
         found.push(el);
       } catch (e) {}
     }
+    for (var x = 0; x < menuExtra.length; x++) found.push(menuExtra[x]);
     var out = [];
     for (var k = 0; k < found.length; k++) {
       if (out.indexOf(found[k]) < 0 && onScreen(found[k])) out.push(found[k]);
@@ -584,6 +625,79 @@
       return true;
     });
   }
+
+  // Buttons the remote already does better (◀ ▶ ⏯ ⏪ ⏩ and its own volume) are left out
+  var REMOTE_DOES = /\b(play|pause|replay|volume|mute|unmute|sound|speaker|rewind|fast.?forward|forward|backward|seek|skip|next|previous|prev|\+ ?10|- ?10)\b/;
+  var menuBase = null;      // the player's own bar, as it was when you pressed ▼
+
+  // The progress bar (the line you drag to move through the video): found by its name
+  // (progress, seek, timeline, slider…) or, failing that, as the long thin line near the
+  // bottom. With the frame on it, ◀ ▶ move through the video, faster the longer you hold.
+  var BAR_WORDS = /prog|seek|timeline|scrub|rail|slider|time.?bar|range/;
+  function progressBar() {
+    var W = window.innerWidth, H = window.innerHeight, best = null, bw = 0, named = false;
+    var all = findAll(document, 'body *', []);
+    for (var i = 0; i < all.length && i < 6000; i++) {
+      var el = all[i];
+      if (el.ownerSVGElement || /^(video|iframe|svg)$/i.test(el.tagName)) continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < W * 0.3 || r.height < 2 || r.height > 30 || r.top < H * 0.5) continue;
+      var isNamed = el.getAttribute('role') === 'slider' || (el.tagName === 'INPUT' && el.type === 'range') ||
+                    BAR_WORDS.test(labelOf(el).replace(/\s+/g, ' ').slice(0, 200));
+      if (!isNamed && named) continue;
+      if (isNamed && !named) { named = true; best = null; bw = 0; }
+      if (r.width > bw && onBar(el)) { bw = r.width; best = el; }
+    }
+    return best;
+  }
+  function onBar(el) {          // showing and on top, without the "not too big" rule
+    var r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none') return false;
+    // Look at a few spots along it (other parts of the controls can overlap its edges)
+    var ys = [r.top + r.height / 2, r.top + 1], xs = [0.25, 0.5, 0.75];
+    for (var i = 0; i < ys.length; i++) {
+      for (var j = 0; j < xs.length; j++) {
+        var hit = null;
+        try { hit = document.elementFromPoint(r.left + r.width * xs[j], ys[i]); } catch (e) {}
+        if (hit && (hit === el || el.contains(hit) || hit.contains(el))) return true;
+      }
+    }
+    return false;
+  }
+  var menuBar = null, menuFromBar = null, scrubAt = 0, scrubHeld = 0;
+  var menuItems = null;     // the options of the menu that's open (the frame stays among them)
+  function scrub(dir) {
+    var v = mainVideo();
+    if (!v || !isFinite(v.duration) || v.duration <= 0) return;
+    var now = Date.now();
+    if (now - scrubAt < 140) return;                     // holding the button: a steady pace
+    if (now - scrubAt > 600) scrubHeld = now;            // a fresh press
+    scrubAt = now;
+    var step = now - scrubHeld < 2000 ? 30 : 90;         // held over 2 seconds: bigger steps
+    var t = v.currentTime + (dir === 'right' ? step : -step);
+    t = Math.max(0, Math.min(v.duration - 3, t));
+    try { v.currentTime = t; } catch (e) {}
+    try { window.top.postMessage({ vsHook: 'menu', state: 'scrub', pos: t, dur: v.duration, token: TOKEN }, '*'); } catch (e) {}
+  }
+
+  function pressables() {
+    var all = rawPressables(), W = window.innerWidth, H = window.innerHeight;
+    menuBar = progressBar();
+    var list = all.filter(function (el) {
+      if (menuBar && (el === menuBar || menuBar.contains(el) || el.contains(menuBar))) return false;
+      if (REMOTE_DOES.test(labelOf(el))) return false;
+      var inBar = menuBase && menuBase.indexOf(el) >= 0;
+      if (!inBar) return true;                       // something a press opened (a menu): fine
+      var r = el.getBoundingClientRect(), c = centre(r);
+      if (r.width > r.height * 3 && r.width > W * 0.2) return false;          // the progress bar
+      if (c.x > W * 0.3 && c.x < W * 0.7 && c.y > H * 0.25 && c.y < H * 0.75) return false;  // middle: play / skip
+      return c.x >= W * 0.5;     // right-hand side: subtitles, settings, fullscreen, extra options
+    });
+    if (menuBar && !menuShownMenu()) list.push(menuBar);
+    return list;
+  }
+  // Is one of the player's menus open? (then the progress bar is out of the way)
+  function menuShownMenu() { return !!menuOpener; }
   function labelOf(el) {
     return ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' +
             (typeof el.className === 'string' ? el.className : '') + ' ' + (el.id || '') + ' ' +
@@ -635,17 +749,41 @@
     for (var t = 0; t < tests.length; t++) {
       for (var i = 0; i < list.length; i++) if (tests[t].test(labelOf(list[i]))) return list[i];
     }
-    // Otherwise the bottom-right one (where controls usually sit)
-    var best = null, bs = -Infinity;
-    for (var j = 0; j < list.length; j++) {
-      var r = list[j].getBoundingClientRect(), sc = r.bottom * 2 + r.right;
-      if (sc > bs) { bs = sc; best = list[j]; }
+    // Otherwise the first one along the bottom bar (subtitles usually come first there)
+    var low = -Infinity;
+    for (var j = 0; j < list.length; j++) low = Math.max(low, list[j].getBoundingClientRect().bottom);
+    var best = null, bl = Infinity;
+    for (var k = 0; k < list.length; k++) {
+      var r = list[k].getBoundingClientRect();
+      if (r.bottom > low - 12 && r.left < bl) { bl = r.left; best = list[k]; }
     }
     return best;
   }
   function menuStep(dir) {
+    if (menuCur && menuCur === menuBar && menuBar.isConnected && (dir === 'left' || dir === 'right')) {
+      scrub(dir);
+      drawFrame();
+      return;
+    }
     var list = pressables();
     if (!list.length) return;
+    if (menuCur && menuCur === menuBar && dir === 'down') {
+      // Back down to the button you came up from, or else the first one on the bottom bar
+      var barTop = menuBar.getBoundingClientRect().top;
+      var below = list.filter(function (el) { return el !== menuBar && el.getBoundingClientRect().top > barTop; });
+      var back = menuFromBar && below.indexOf(menuFromBar) >= 0 ? menuFromBar : firstPick(below);
+      if (back) { menuCur = back; drawFrame(); }
+      return;
+    }
+    // A menu is open: move only among its options (and back to the button that opened it)
+    if (menuItems) {
+      var inMenu = menuItems.filter(function (el) { return list.indexOf(el) >= 0; });
+      if (inMenu.length) {
+        if (menuOpener && list.indexOf(menuOpener) >= 0) inMenu.push(menuOpener);
+        list = inMenu;
+      } else { menuItems = null; menuOpener = null; }       // it closed by itself
+    }
+    var was = menuCur;
     if (!menuCur || list.indexOf(menuCur) < 0) {
       menuCur = menuCur && menuCur.isConnected ? nearestTo(list, menuCur.getBoundingClientRect()) : firstPick(list);
       drawFrame();
@@ -670,14 +808,21 @@
         line = bc.x > a.left - 2 && bc.x < a.right + 2 || ac.x > b.left - 2 && ac.x < b.right + 2;
       }
       if (along <= 2) continue;
+      if (!line && (dir === 'left' || dir === 'right')) continue;   // ◀ ▶ stay on the same row
       var score = line ? along : along + across * 3;
       if ((line && !bestLine) || (line === bestLine && score < bestScore)) { bestScore = score; best = el; bestLine = line; }
     }
-    if (best) { menuCur = best; drawFrame(); }
+    if (best) {
+      if (best === menuBar && was !== menuBar) menuFromBar = was;    // to come back to with ▼
+      menuCur = best;
+      drawFrame();
+    }
   }
   function menuPress() {
     if (!menuCur || !menuCur.isConnected) { menuStep('down'); return; }
+    if (menuCur === menuBar) return;      // OK on the progress bar: nothing (◀ ▶ move along it)
     var before = pressables(), pressed = menuCur, pr = pressed.getBoundingClientRect();
+    menuShown = showingNow();
     // The player's own fullscreen button: we're already fullscreen, so it means "leave"
     if (/full.?screen|exit.?full|expand|maximi/.test(labelOf(pressed))) {
       try { window.top.postMessage({ vsHook: 'menu', state: 'fullscreen', token: TOKEN }, '*'); } catch (e) {}
@@ -693,14 +838,26 @@
     setTimeout(function () {
       if (!menuOn) return;
       wakeControls();
+      // Options in whatever just opened, found by their words (menus often have nothing
+      // else to show they can be pressed)
+      var shown = showingNow();
+      var added = [];
+      shown.forEach(function (el) {
+        if (menuShown && !menuShown.has(el) && ownWords(el) && !el.ownerSVGElement) added.push(el);
+      });
+      if (added.length) menuExtra = added;
       var now = pressables();
       // A menu just opened: jump into it (to the option that's ticked, if there is one)
       var fresh = now.filter(function (el) { return before.indexOf(el) < 0; });
       if (fresh.length) {
         menuOpener = pressed;                // to come back to when this menu closes
+        menuItems = fresh;
         var ticked = fresh.filter(function (el) {
-          return el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-selected') === 'true' ||
-                 /\b(active|selected|checked|current)\b/.test(typeof el.className === 'string' ? el.className : '');
+          for (var n = el, d = 0; n && d < 3; n = n.parentElement, d++) {
+            if (n.getAttribute('aria-checked') === 'true' || n.getAttribute('aria-selected') === 'true' ||
+                /\b(active|selected|checked|current|is-on)\b/.test(typeof n.className === 'string' ? n.className : '')) return true;
+          }
+          return false;
         });
         // otherwise the first one in the menu (top, then left)
         menuCur = ticked[0] || fresh.slice().sort(function (x, y) {
@@ -711,6 +868,7 @@
         // You picked something and the menu closed: back to the button that opened it
         menuCur = menuOpener && now.indexOf(menuOpener) >= 0 ? menuOpener : (now.length ? nearestTo(now, pr) : null);
         menuOpener = null;
+        menuItems = null;
       }
       drawFrame();
     }, menuReal ? 550 : 350);
@@ -725,6 +883,8 @@
     setTimeout(function () {
       if (!menuOn) return;
       wakeControls();
+      menuBase = rawPressables();
+      menuExtra = [];
       var list = pressables();
       menuCur = list.length ? firstPick(list) : null;
       drawFrame();
@@ -736,6 +896,12 @@
     menuOn = false;
     menuCur = null;
     menuOpener = null;
+    menuBase = null;
+    menuExtra = [];
+    menuShown = null;
+    menuBar = null;
+    menuFromBar = null;
+    menuItems = null;
     clearInterval(menuWake);
     drawFrame();
     if (was) hideControlsSoon();
@@ -760,6 +926,54 @@
       st.textContent = PIP_CSS;
     }
     if (!st.isConnected) (document.head || document.documentElement).appendChild(st);
+  }
+
+  // ── Phone: tap the empty middle of the picture to hide the controls ──
+  // Every player shows its controls when you tap, but not all hide them again when you tap
+  // the picture a second time. Here, a tap on an empty bit of the picture (not a button,
+  // not the play button) while the controls are showing hides them straight away. The next
+  // tap brings them back as usual. (Hidden the same way as in the floating window.)
+  function quietLook(on) {
+    var st = document.getElementById('vs-hook-quiet');
+    if (!on) { if (st) st.remove(); return; }
+    if (!st) { st = document.createElement('style'); st.id = 'vs-hook-quiet'; st.textContent = PIP_CSS; }
+    if (!st.isConnected) (document.head || document.documentElement).appendChild(st);
+    var v = mainVideo();
+    if (v) v.addEventListener('pause', function () { quietLook(false); }, { once: true });   // paused: show them
+  }
+  function isControl(el) {
+    var W = window.innerWidth, H = window.innerHeight;
+    for (var n = el; n && n !== document.body && n.nodeType === 1; n = n.parentElement) {
+      if (/^(video)$/i.test(n.tagName)) return false;
+      var r = n.getBoundingClientRect();
+      if (r.width * r.height > W * H * 0.25) return false;     // a layer over the whole picture
+      if (n.matches && n.matches(CLICKY)) return true;
+      if (/^(svg|img|i)$/i.test(n.tagName)) return true;
+      try { if (getComputedStyle(n).cursor === 'pointer') return true; } catch (e) {}
+    }
+    return false;
+  }
+  function controlsShowing() {
+    var list = rawPressables(), memo = new Map();
+    for (var i = 0; i < list.length; i++) if (seenAmount(list[i], memo) > 0.3) return true;
+    return false;
+  }
+  var quietTap = null;
+  if (!ON_TV && window.top !== window) {
+    window.addEventListener('pointerdown', function (e) {
+      quietTap = null;
+      if (!e.isTrusted || menuOn) return;
+      if (document.getElementById('vs-hook-quiet')) { quietLook(false); return; }   // bring them back
+      if (!allVideos(document).length || isControl(e.target)) return;
+      quietTap = { x: e.clientX, y: e.clientY, t: Date.now(), showing: controlsShowing() };
+    }, true);
+    window.addEventListener('pointerup', function (e) {
+      var t = quietTap;
+      quietTap = null;
+      if (!t || !t.showing || !e.isTrusted) return;
+      if (Date.now() - t.t > 500 || Math.abs(e.clientX - t.x) > 12 || Math.abs(e.clientY - t.y) > 12) return;
+      setTimeout(function () { quietLook(true); hideControls(); }, 80);
+    }, true);
   }
 
   window.addEventListener('message', function (e) {
